@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+*.parquet
+data/cache/
+data/raw/
+node_modules/
+.next/
+dist/
+.DS_Store
