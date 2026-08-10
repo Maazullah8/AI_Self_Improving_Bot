@@ -22,7 +22,7 @@ from typing import Optional, Sequence
 
 from trading_bot.core.enums import ConfluenceLevel, Side, Timeframe
 from trading_bot.core.models import Candle
-from trading_bot.data.resample import resample_candles
+from trading_bot.data.resample import IncrementalResampler
 from trading_bot.replay.engine import Context, Signal
 from trading_bot.strategy.base import BaseStrategy, register
 from trading_bot.strategy.smc.bias import BiasEngine, BiasResult
@@ -38,10 +38,10 @@ from trading_bot.strategy.smc.zones import (
 
 @dataclass
 class SMCParams:
-    # --- timeframes
-    htf: str = "h1"  # higher timeframe for bias/zones
-    zone_tf: str = "h1"  # timeframe for zone geometry
-    ltf: str = "m5"  # signal/confirmation timeframe (usually equals primary)
+    # --- timeframes (Timeframe enum values: "1h", "5m", "4h", ...)
+    htf: str = "1h"  # higher timeframe for bias/zones
+    zone_tf: str = "1h"  # timeframe for zone geometry
+    ltf: str = "5m"  # signal/confirmation timeframe (usually equals primary)
 
     # --- structure
     swing_left: int = 2
@@ -105,7 +105,6 @@ class SMCStrategy(BaseStrategy):
     ]
 
     def __init__(self, params: Optional[dict] = None):
-        super().__init__(params)
         self.p = SMCParams(**{k: v for k, v in (params or {}).items() if k in SMCParams.__dataclass_fields__})
         self._attempts: dict[str, int] = {}  # zone_key -> attempts used
         self._htf_detector = StructureDetector(left=self.p.swing_left, right=self.p.swing_right)
@@ -113,6 +112,16 @@ class SMCStrategy(BaseStrategy):
         self._ltf_detector = StructureDetector(left=self.p.swing_left, right=self.p.swing_right)
         self._last_signal: Optional[Signal] = None
         self._log: list[dict] = []
+        # incremental HTF/zone aggregation caches (avoids O(n^2) resample)
+        self._htf_res = IncrementalResampler(Timeframe(self.p.htf))
+        self._zone_res = IncrementalResampler(Timeframe(self.p.zone_tf))
+        self._fed = 0
+        self._htf_cached_key: Optional[int] = None
+        self._htf_state = None
+        self._cached_bias: Optional[BiasResult] = None
+        self._cached_zones: list = []
+        self._cached_liquidity: list = []
+        super().__init__(params)
 
     def set_params(self, params: dict) -> None:
         super().set_params(params)
@@ -122,25 +131,62 @@ class SMCStrategy(BaseStrategy):
         self._htf_detector = StructureDetector(left=self.p.swing_left, right=self.p.swing_right)
         self._bias_engine = BiasEngine(lookback=self.p.bias_lookback)
         self._ltf_detector = StructureDetector(left=self.p.swing_left, right=self.p.swing_right)
+        # resamplers depend on timeframe params; drop caches (rebuilt lazily)
+        self._htf_res = IncrementalResampler(Timeframe(self.p.htf))
+        self._zone_res = IncrementalResampler(Timeframe(self.p.zone_tf))
+        self._htf_cached_key = None
+
+    def get_params(self) -> dict:
+        """Full effective params (defaults + overrides) for versioning."""
+        import dataclasses
+
+        return dataclasses.asdict(self.p)
+
+    def _feed_bars(self, ctx: Context) -> tuple[list[Candle], list[Candle]]:
+        """Feed the latest closed bar to the incremental resamplers and return
+        the current HTF and zone bar views. Rebuilds if the call sequence is
+        discontinuous (fresh engine run, direct diagnostic call, etc.)."""
+        bars = ctx.bars
+        n = len(bars)
+        if n != self._fed + 1:
+            self._htf_res.reset()
+            self._zone_res.reset()
+            for b in bars:
+                self._htf_res.add(b)
+                self._zone_res.add(b)
+            self._fed = n
+        else:
+            b = bars[-1]
+            self._htf_res.add(b)
+            self._zone_res.add(b)
+            self._fed = n
+        return self._htf_res.view(), self._zone_res.view()
 
     # ------------------------------------------------------------- helpers
-    def _htf_bars(self, bars: Sequence[Candle]) -> list[Candle]:
-        target = Timeframe(self.p.htf)
-        return resample_candles(bars, target)
-
-    def _zone_bars(self, bars: Sequence[Candle]) -> list[Candle]:
-        target = Timeframe(self.p.zone_tf)
-        return resample_candles(bars, target)
-
     def _atr(self, bars: Sequence[Candle], period: Optional[int] = None) -> float:
+        """Incremental ATR: maintains a rolling TR series so each call is O(1)."""
         period = period or self.p.atr_period
-        if len(bars) < 2:
+        n = len(bars)
+        if n < 2:
             return 0.0
-        trs = []
-        for i in range(1, len(bars)):
-            prev, cur = bars[i - 1], bars[i]
-            trs.append(max(cur.high - cur.low, abs(cur.high - prev.close), abs(cur.low - prev.close)))
-        recent = trs[-period:]
+        if not hasattr(self, "_trs"):
+            self._trs = []
+            self._atr_n = 0
+        if self._atr_n == n:
+            pass  # already synced with these bars
+        elif self._atr_n == n - 1:
+            prev, cur = bars[-2], bars[-1]
+            self._trs.append(
+                max(cur.high - cur.low, abs(cur.high - prev.close), abs(cur.low - prev.close))
+            )
+            self._atr_n = n
+        else:
+            self._trs = [
+                max(bars[i].high - bars[i].low, abs(bars[i].high - bars[i - 1].close), abs(bars[i].low - bars[i - 1].close))
+                for i in range(1, n)
+            ]
+            self._atr_n = n
+        recent = self._trs[-period:]
         return sum(recent) / len(recent) if recent else 0.0
 
     def _zone_key(self, z: Zone) -> str:
@@ -161,31 +207,55 @@ class SMCStrategy(BaseStrategy):
                     return True
         return False
 
+    def _reject(self, ctx: Context, reason: str, **extra) -> None:
+        """Record why a bar produced no signal (rolling, capped trace)."""
+        entry = {"index": ctx.index, "time": ctx.current.time, "reason": reason}
+        entry.update(extra)
+        self._log.append(entry)
+        if len(self._log) > 10_000:
+            self._log = self._log[-2000:]
+
     # ------------------------------------------------------------- main
     def on_bar(self, ctx: Context) -> Optional[Signal]:
         self._last_signal = None
         bars = ctx.bars
         n = len(bars)
         if n < self.p.swing_left + self.p.swing_right + 4:
+            self._reject(ctx, "warmup")
             return None
 
-        htf_bars = self._htf_bars(bars)
-        zone_bars = self._zone_bars(bars)
+        htf_bars, zone_bars = self._feed_bars(ctx)
         if len(htf_bars) < 20 or len(zone_bars) < 20:
+            self._reject(ctx, "htf_warmup")
             return None
 
-        # ---- HTF bias & structure (bias comes from HTF bars)
-        htf_state = self._htf_detector.update(htf_bars)
-        bias: BiasResult = self._bias_engine.compute(htf_bars, htf_state)
+        # ---- HTF-derived state, recomputed only when a new HTF bar completes
+        htf_key = self._htf_res.last_completed
+        if htf_key != self._htf_cached_key:
+            htf_state = self._htf_detector.update(htf_bars)
+            self._cached_bias = self._bias_engine.compute(htf_bars, htf_state)
+            self._cached_zones = find_all_zones(
+                zone_bars,
+                lookback=self.p.zone_lookback,
+                min_body_ratio=self.p.min_ob_body_ratio,
+            )
+            self._cached_liquidity = find_liquidity_pools(
+                zone_bars,
+                lookback=self.p.zone_lookback,
+                min_touches=self.p.liquidity_min_touches,
+                window_bars=self.p.liquidity_window_bars,
+            )
+            self._htf_state = htf_state
+            self._htf_cached_key = htf_key
+
+        bias: BiasResult = self._cached_bias
+        zones = self._cached_zones
+        liquidity = self._cached_liquidity
+
         if self.p.require_bias and bias.side is None:
+            self._reject(ctx, "no_bias")
             return None
 
-        # ---- zones from HTF geometry
-        zones = find_all_zones(
-            zone_bars,
-            lookback=self.p.zone_lookback,
-            min_body_ratio=self.p.min_ob_body_ratio,
-        )
         # filter to zones aligned with bias and near current price
         side = bias.side
         aligned = [
@@ -193,6 +263,7 @@ class SMCStrategy(BaseStrategy):
             if z.direction == ("bullish" if side is Side.BUY else "bearish")
         ]
         if not aligned:
+            self._reject(ctx, "no_aligned_zone")
             return None
 
         current_price = bars[-1].close
@@ -201,21 +272,17 @@ class SMCStrategy(BaseStrategy):
         # --- pick the nearest actionable zone in the direction of trade
         zone = self._pick_zone(aligned, side, current_price, atr)
         if zone is None:
+            self._reject(ctx, "no_actionable_zone")
             return None
 
         key = self._zone_key(zone)
         attempts = self._attempts.get(key, 0)
         if attempts >= self.p.max_attempts:
+            self._reject(ctx, "max_attempts", zone_key=key, attempts=attempts)
             return None
 
         # --- confluence computed before confirmation
         if self.p.require_min_confluence:
-            liquidity = find_liquidity_pools(
-                zone_bars,
-                lookback=self.p.zone_lookback,
-                min_touches=self.p.liquidity_min_touches,
-                window_bars=self.p.liquidity_window_bars,
-            )
             conf = compute_confluence(
                 side=side,
                 bias=bias,
@@ -226,16 +293,19 @@ class SMCStrategy(BaseStrategy):
                 min_confluence=self.p.min_confluence,
             )
             if conf.level == ConfluenceLevel.NONE:
+                self._reject(ctx, "no_confluence", score=conf.score)
                 return None
         else:
             conf = None
 
         # --- price reached zone? (proximity check)
         if not self._price_in_zone(zone, side, current_price, atr):
+            self._reject(ctx, "not_in_zone", zone_key=key)
             return None
 
         # --- never chase: price already ran too far past the zone
         if self._is_chasing(zone, side, current_price, atr):
+            self._reject(ctx, "chasing", zone_key=key)
             return None
 
         # --- LTF CHoCH/CSD (mandatory): a fresh shift aligned with trade side
@@ -244,6 +314,7 @@ class SMCStrategy(BaseStrategy):
             ltf_state = self._ltf_detector.update(bars)
             choch = ltf_state.last_choch if ltf_state.last_choch else ltf_state.last_mss
             if choch is None or not self._choch_aligned(choch, side):
+                self._reject(ctx, "no_choch")
                 return None
 
         # --- confirmation candle (mandatory)
@@ -258,6 +329,7 @@ class SMCStrategy(BaseStrategy):
                 use_mother_baby=self.p.use_mother_baby,
             )
             if conf_candle is None:
+                self._reject(ctx, "no_confirmation")
                 return None
         else:
             conf_candle = None
@@ -276,21 +348,25 @@ class SMCStrategy(BaseStrategy):
             ctx=ctx,
         )
         if entry is None:
+            self._reject(ctx, "signal_geometry", zone_key=key)
             return None
 
         # enforce min RR
         risk = abs(entry.entry - entry.sl)
         reward = abs(entry.tp - entry.entry)
         if risk <= 0:
+            self._reject(ctx, "zero_risk")
             return None
         rr = reward / risk
         if rr < self.p.min_rr:
-            return None  # reject trade: 1:2 impossible
+            self._reject(ctx, "min_rr", rr=round(rr, 2))
+            return None
 
         self._last_signal = entry
         self._attempts[key] = attempts + 1
         entry.setup["attempt"] = attempts + 1
         entry.setup["zone_key"] = key
+        self._log.append({"index": ctx.index, "time": ctx.current.time, "reason": "signal", "zone_key": key})
         return entry
 
     # ------------------------------------------------------ helper logic

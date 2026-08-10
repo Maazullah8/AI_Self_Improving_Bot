@@ -26,3 +26,6 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "slow: end-to-end / long-running integration tests",
+]

@@ -19,6 +19,93 @@ def _bucket_of(ts: int, timeframe: Timeframe) -> int:
     return bar_open_time_minutes(ts, timeframe.minutes)
 
 
+class IncrementalResampler:
+    """Stateful, streaming version of ``resample_candles``.
+
+    Feed closed bars one at a time via ``add(bar)``; ``view()`` returns the
+    completed higher-timeframe candles plus the in-progress partial candle
+    (which contains only bars seen so far, so no lookahead). ``last_completed``
+    is the open time of the most recently completed HTF candle (or None), which
+    callers can use to detect whether the HTF set actually changed.
+
+    This avoids O(n^2) re-aggregation when a strategy is called bar-by-bar.
+    """
+
+    def __init__(self, target: Timeframe):
+        self.target = target
+        self.candles: list[Candle] = []
+        self._bucket = -1
+        self._o = self._h = self._l = self._c = 0.0
+        self._vol = 0.0
+        self._spread_sum = 0.0
+        self._spread_cnt = 0
+
+    def add(self, bar: Candle) -> None:
+        bucket = _bucket_of(bar.time, self.target)
+        if bucket != self._bucket:
+            self.flush()
+            self._bucket = bucket
+            self._o = self._h = self._l = self._c = bar.open
+        self._c = bar.close
+        self._h = max(self._h, bar.high)
+        self._l = min(self._l, bar.low)
+        self._vol += bar.volume
+        if bar.spread is not None and bar.spread > 0:
+            self._spread_sum += bar.spread
+            self._spread_cnt += 1
+
+    def flush(self) -> None:
+        """Finalize the in-progress candle into the completed list."""
+        if self._bucket < 0:
+            return
+        avg = self._spread_sum / self._spread_cnt if self._spread_cnt else 0.0
+        self.candles.append(
+            Candle(
+                time=self._bucket,
+                open=self._o,
+                high=self._h,
+                low=self._l,
+                close=self._c,
+                volume=self._vol,
+                spread=avg,
+            )
+        )
+        self._vol = 0.0
+        self._spread_sum = 0.0
+        self._spread_cnt = 0
+        self._bucket = -1
+
+    @property
+    def last_completed(self) -> Optional[int]:
+        return self.candles[-1].time if self.candles else None
+
+    def view(self) -> list[Candle]:
+        out = list(self.candles)
+        if self._bucket >= 0:
+            avg = self._spread_sum / self._spread_cnt if self._spread_cnt else 0.0
+            out.append(
+                Candle(
+                    time=self._bucket,
+                    open=self._o,
+                    high=self._h,
+                    low=self._l,
+                    close=self._c,
+                    volume=self._vol,
+                    spread=avg,
+                )
+            )
+        return out
+
+    def reset(self) -> None:
+        self.candles = []
+        self._bucket = -1
+        self._o = self._h = self._l = self._c = 0.0
+        self._vol = 0.0
+        self._spread_sum = 0.0
+        self._spread_cnt = 0
+
+
+
 def aggregate_ticks_to_candles(ticks: Sequence[Tick], timeframe: Timeframe) -> list[Candle]:
     """Aggregate a sorted tick stream into aligned candles."""
     if not ticks:

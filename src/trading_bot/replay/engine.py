@@ -138,6 +138,7 @@ class ReplayEngine:
         self.trades: list[TradeOutcome] = []
         self.fills: list[Fill] = []
         self.equity_curve: list[EquityPoint] = []
+        self._setups: dict[str, dict] = {}
         self._cash = config.initial_cash
         self._seq = 0
         self._rng = None
@@ -217,6 +218,7 @@ class ReplayEngine:
             broker_comment=risk_comment,
         )
         self.positions.append(pos)
+        self._setups[pos.id] = dict(signal.setup or {})
         commission = self._commission_for(pos)
         self._cash -= commission
         self.fills.append(
@@ -242,15 +244,18 @@ class ReplayEngine:
             c += pos.size * pos.open_price * exec_.commission_percent * 100
         return c
 
+    def _contract_size(self) -> float:
+        return self.sym.contract_size or 1.0
+
     def _notional(self, pos: Position, price: float) -> float:
-        return pos.size * price
+        return pos.size * price * self._contract_size()
 
     def _pnl(self, pos: Position, exit_price: float) -> float:
-        """P&L in price units * size. Volume/contract adjustments can be
-        layered on by the caller via a profit converter."""
+        """P&L in account currency. size is in lots; P&L = price_diff *
+        lots * contract_size."""
         if pos.side is Side.BUY:
-            return (exit_price - pos.open_price) * pos.size
-        return (pos.open_price - exit_price) * pos.size
+            return (exit_price - pos.open_price) * pos.size * self._contract_size()
+        return (pos.open_price - exit_price) * pos.size * self._contract_size()
 
     def _points(self, pos: Position) -> float:
         return self._point_size()
@@ -276,6 +281,10 @@ class ReplayEngine:
                     self.risk.on_strategy_error(bar, e)
                 signal = None
             if signal is not None:
+                if not signal.strategy:
+                    signal.strategy = getattr(strategy, "name", "") or ""
+                if not signal.strategy_version:
+                    signal.strategy_version = getattr(strategy, "version", "") or ""
                 self._process_signal(signal, bar, i)
         self._close_all(PositionStatus.FLATTENED, ExitReason.FLATTEN, self.candles[-1])
         return self._result()
@@ -283,11 +292,12 @@ class ReplayEngine:
     def _process_signal(self, signal: Signal, bar: Candle, i: int) -> None:
         size = signal.size
         if self.risk is not None:
-            approved, size, comment = self.risk.approve(signal, bar, self._equity(), self.positions)
-            if not approved:
+            decision = self.risk.approve(signal, bar, self._equity(), self.positions)
+            if not decision.approved:
                 return
+            size = decision.size
             signal.size = size
-            signal.setup["risk_comment"] = comment
+            signal.setup["risk_comment"] = decision.reason
         elif size <= 0:
             return
         self.open_position(signal, size, bar)
@@ -464,9 +474,11 @@ class ReplayEngine:
         risk_points = abs(pos.open_price - pos.sl)
         pts = self._points(pos)
         mfe_points, mae_points = self._tracked_extremes(pos)
-        r = pnl / (risk_points * pos.size) if risk_points > 0 else 0.0
-        mfe_r = mfe_points / risk_points if risk_points > 0 else 0.0
-        mae_r = mae_points / risk_points if risk_points > 0 else 0.0
+        risk_units = risk_points * pos.size * self._contract_size()
+        r = pnl / risk_units if risk_units > 0 else 0.0
+        risk_in_price = risk_points / pts if risk_points > 0 else 0.0
+        mfe_r = (mfe_points * pts) / risk_points if risk_points > 0 else 0.0
+        mae_r = (mae_points * pts) / risk_points if risk_points > 0 else 0.0
         closed = Position(
             id=pos.id, symbol=pos.symbol, side=pos.side, size=pos.size,
             open_price=pos.open_price, open_time=pos.open_time,
@@ -501,6 +513,9 @@ class ReplayEngine:
         if not hasattr(self, "_extreme_tracker"):
             self._extreme_tracker = {}
         return self._extreme_tracker.get(pos.id, (0.0, 0.0))
+
+    def setup_for(self, pos_id: str) -> dict:
+        return self._setups.get(pos_id, {})
 
     def _snapshot_equity(self, bar: Candle) -> None:
         open_pnl = sum(self._pnl(p, bar.close) for p in self.positions if p.status == PositionStatus.OPEN)
@@ -566,7 +581,9 @@ class DummyRiskManager:
     """No-op risk manager for replay-only tests."""
 
     def approve(self, signal, bar, equity, positions):
-        return True, signal.size or 1.0, "ok"
+        from trading_bot.risk.manager import RiskDecision
+
+        return RiskDecision.approve(signal.size or 1.0, {})
 
     def on_position_open(self, pos):
         pass

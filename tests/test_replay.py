@@ -15,10 +15,10 @@ from trading_bot.replay.engine import (
 )
 
 
-def _sym(digits=5):
+def _sym(digits=5, contract_size=1):
     return SymbolInfo(
         symbol="EURUSD", digits=digits, tick_size=1e-5, point_size=1e-5,
-        contract_size=100_000, lot_min=0.01, lot_max=100.0, lot_step=0.01,
+        contract_size=contract_size, lot_min=0.01, lot_max=100.0, lot_step=0.01,
     )
 
 

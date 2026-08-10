@@ -11,6 +11,11 @@ from trading_bot.core.enums import MarketSession, Timeframe
 EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+def utcnow_ts() -> int:
+    """Current time as integer epoch seconds in UTC."""
+    return int(datetime.now(timezone.utc).timestamp())
+
+
 def utc_ts(y: int, m: int, d: int, hh: int = 0, mm: int = 0, ss: int = 0) -> int:
     return int(datetime(y, m, d, hh, mm, ss, tzinfo=timezone.utc).timestamp())
 
@@ -90,6 +95,7 @@ def is_weekend(ts: int) -> bool:
 
 __all__ = [
     "utc_ts",
+    "utcnow_ts",
     "ts_to_dt",
     "bar_open_time",
     "bar_open_time_minutes",
