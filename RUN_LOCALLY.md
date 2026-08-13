@@ -198,6 +198,14 @@ max drawdown and Sharpe. `--timeframe` accepts `1m, 3m, 5m, 15m, 30m, 1h,
 `SPX`, `NAS100`, `BTCUSD`, `ETHUSD`, plus any Yahoo ticker passed through
 (e.g. `EURUSD=X`).
 
+> **Equity curve & Monte Carlo in the dashboard**: after you click **Run
+> backtest** on the *Backtesting* page, the result shows the **equity curve**
+> chart and a **Monte Carlo** panel (2,000 bootstrap resamples of your actual
+> trade sequence): median / P5 / P95 final equity, worst drawdown and losing
+> streak at the 95th percentile, and the risk of ruin. The promotion gates in
+> `src/trading_bot/validation/pipeline.py` require MC ruin < 5% and MC
+> drawdown < 40% before a strategy can be promoted.
+
 > **About XAUUSD on Yahoo**: Yahoo has no spot-gold ticker, so the provider
 > maps `XAUUSD → GC=F` (front-month COMEX gold futures) — the closest
 > freely-available series. See the docstring in
@@ -222,16 +230,62 @@ python -m trading_bot.api.run --live --symbol XAUUSD --timeframe 5m --poll-secon
   journaled, so they flow into Analytics, Trade History and AI Review.
 - `/api/live` exposes the full snapshot for the dashboard.
 
-### Live from the API (same code, different executor)
+### MT5 demo trading (real orders, demo account)
 
-To execute on a real (or MT5 demo) account, swap the executor in
-`src/trading_bot/api/run.py` from `SimulatedExecutor` to `MT5Executor(login=...,
-password=..., server=...)`. The strategy, risk and journaling are identical.
+MetaTrader 5 lets the bot place **real orders on a demo account** — the exact
+same strategy, risk and journaling code as paper trading. This is how you
+validate execution against a real broker feed before ever considering live
+money.
 
-**Never run this on a real-money account until the promotion gates pass** and
-you've reviewed the AI feedback (see `README.md`). The pipeline will refuse to
-trade on stale data, strategy errors, or an unhealthy broker — but that's a
-safety net, not a substitute for validation.
+**1. Install & log in to MT5**
+- Install the MetaTrader 5 desktop terminal (**Windows only**).
+- Open it and log in to a **demo account** (in the terminal: *File → Open an
+  Account → Open a demo account*). Leave the terminal **running** in the
+  background.
+- Make sure the symbol you'll trade (e.g. `XAUUSD`) is visible in *Market
+  Watch* with history downloaded.
+- Install the Python package:
+  ```bash
+  pip install MetaTrader5
+  ```
+
+**2. Start the bot against your demo account**
+
+```bash
+python -m trading_bot.api.run --live --symbol XAUUSD --timeframe 5m \
+    --executor mt5 --mt5-login 12345678 --mt5-password yourpass \
+    --mt5-server "ICMarkets-Demo" --poll-seconds 30
+```
+
+| Flag | Meaning |
+|---|---|
+| `--executor mt5` | route orders through the MT5 terminal (fail-closed if it can't) |
+| `--mt5-login` | your demo account login (number) |
+| `--mt5-password` | demo account password |
+| `--mt5-server` | broker server name, exactly as it appears in MT5 login |
+| `--mt5-path` | full path to `terminal64.exe` if it isn't auto-detected |
+| `--timeframe` | bar timeframe; keep `--poll-seconds` ≈ 2–6× the bar length |
+
+The server **refuses to start** if MT5 isn't ready (no terminal, wrong
+credentials, symbol missing) — it never guesses.
+
+**3. Watch it**
+
+- The dashboard's **Live Trades** page shows positions, balance and P&L in
+  near real time.
+- Trades also appear in your MT5 terminal under *Trade*, with SL/TP attached
+  to each order.
+- Closed trades are journaled and show up in Analytics, Trade History and AI
+  Review — exactly like backtests.
+
+**4. Safety rules (don't skip)**
+
+- Use a **demo account** until the strategy passes the promotion gates
+  (Monte Carlo ruin < 5%, drawdown tail < 40%, see `README.md`).
+- The pipeline is fail-closed: stale data, strategy errors, or an unhealthy
+  broker mean **no trade**. That's a safety net, not a substitute for
+  validation — review AI feedback before real money.
+- `--seed-demo` only populates historical data; it never affects live orders.
 
 ---
 

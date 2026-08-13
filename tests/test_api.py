@@ -89,6 +89,39 @@ class TestApi:
         assert body["n_bars"] > 0
         assert "metrics" in body
 
+    def test_backtest_returns_equity_curve_and_monte_carlo(self, client):
+        r = client.post("/api/backtest", json={
+            "symbol": "EURUSD",
+            "timeframe": "5m",
+            "start": utc_ts(2023, 1, 1),
+            "end": utc_ts(2023, 1, 31, 23, 59),
+            "initial_cash": 10000.0,
+            "strategy": "smc_crt",
+            "params": {"htf": "4h", "zone_tf": "4h", "ltf": "5m"},
+            "seed": 42,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert isinstance(body["equity_curve"], list) and len(body["equity_curve"]) > 0
+        mc = body["monte_carlo"]
+        assert mc["n_sims"] == 2000
+        assert "median_final_equity" in mc
+        assert "risk_of_ruin_pct" in mc
+        assert "worst_dd_pct_95" in mc
+        assert "worst_streak_95" in mc
+        # deterministic for the same trade series + seed
+        r2 = client.post("/api/backtest", json={
+            "symbol": "EURUSD",
+            "timeframe": "5m",
+            "start": utc_ts(2023, 1, 1),
+            "end": utc_ts(2023, 1, 31, 23, 59),
+            "initial_cash": 10000.0,
+            "strategy": "smc_crt",
+            "params": {"htf": "4h", "zone_tf": "4h", "ltf": "5m"},
+            "seed": 42,
+        })
+        assert r2.json()["monte_carlo"]["median_final_equity"] == mc["median_final_equity"]
+
     def test_review_endpoint(self, client):
         r = client.post("/api/review", json={
             "strategy": "smc_crt", "strategy_version": "v1.0",

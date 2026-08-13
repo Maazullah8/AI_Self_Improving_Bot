@@ -1,15 +1,26 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, FlaskConical, Play, RefreshCw } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
+import { EquityChart } from "@/components/charts";
 import { Badge, Card, ProgressBar, StatCard } from "@/components/ui";
 import { getDashboardData } from "@/lib/data";
 
 function fmtNum(v, digits = 2) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+function fmtMoney(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return "—";
+  return `$${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+function fmtDate(t) {
+  if (!t) return "";
+  return new Date(t * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 const STATUS_TONE = {
@@ -39,6 +50,7 @@ export default function BacktestingPage() {
     setRunning(true);
     setError(null);
     setResult(null);
+    const now = Math.floor(Date.now() / 1000);
     try {
       const r = await fetch("/api/backtest", {
         method: "POST",
@@ -46,8 +58,8 @@ export default function BacktestingPage() {
         body: JSON.stringify({
           symbol: "XAUUSD",
           timeframe: "5m",
-          start: 0,
-          end: 0,
+          start: now - 90 * 86400,
+          end: now,
           initial_cash: 10000.0,
           strategy: "smc_crt",
           params: { htf: "4h", zone_tf: "4h", ltf: "5m" },
@@ -56,13 +68,36 @@ export default function BacktestingPage() {
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const body = await r.json();
-      setResult(body.metrics ?? body);
+      setResult(body);
     } catch (e) {
       setError(String(e));
     } finally {
       setRunning(false);
     }
   }
+
+  const metrics = result?.metrics ?? result ?? {};
+  const equityData = useMemo(() => {
+    const eq = result?.equity_curve || [];
+    if (!eq.length) return null;
+    // thin out long curves so the chart stays smooth
+    const step = Math.max(1, Math.floor(eq.length / 400));
+    return eq.filter((_, i) => i % step === 0).map((p) => ({
+      name: fmtDate(p.time),
+      value: Math.round(p.equity),
+    }));
+  }, [result]);
+  const mc = result?.monte_carlo;
+  const mcPositive = mc && mc.risk_of_ruin_pct < 5 && mc.worst_dd_pct_95 < 40;
+  const mcStats = [
+    ["Simulations", mc ? fmtNum(mc.n_sims, 0) : "—"],
+    ["Trades resampled", mc ? fmtNum(mc.n_trades, 0) : "—"],
+    ["Median final equity", mc ? fmtMoney(mc.median_final_equity) : "—"],
+    ["P5 / P95 equity", mc ? `${fmtMoney(mc.p5_final_equity)} / ${fmtMoney(mc.p95_final_equity)}` : "—"],
+    ["Worst drawdown (95%)", mc ? `${fmtNum(mc.worst_dd_pct_95, 1)}%` : "—"],
+    ["Worst losing streak (95%)", mc ? fmtNum(mc.worst_streak_95, 0) : "—"],
+    ["Risk of ruin", mc ? `${fmtNum(mc.risk_of_ruin_pct, 2)}%` : "—"],
+  ];
 
   const pipeline = [
     { label: "Training Window", value: "Jan 2023 – Aug 2023", score: 84, tone: "profit" },
@@ -122,13 +157,13 @@ export default function BacktestingPage() {
               <div className="rounded-md bg-muted/20 border border-border p-3 space-y-1.5">
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">Last result</div>
                 {[
-                  ["Bars analyzed", fmtNum(result.n_bars ?? result.n_trades, 0)],
-                  ["Trades", fmtNum(result.n_trades, 0)],
-                  ["Win rate", `${fmtNum(result.win_rate, 1)}%`],
-                  ["Profit factor", fmtNum(result.profit_factor, 2)],
-                  ["Net profit", `$${fmtNum(result.total_pnl, 2)}`],
-                  ["Max drawdown", `${fmtNum(result.max_drawdown_pct, 2)}%`],
-                  ["Sharpe (R)", fmtNum(result.sharpe_r, 2)],
+                  ["Bars analyzed", fmtNum(metrics.n_bars ?? result.n_trades, 0)],
+                  ["Trades", fmtNum(metrics.n_trades, 0)],
+                  ["Win rate", `${fmtNum(metrics.win_rate, 1)}%`],
+                  ["Profit factor", fmtNum(metrics.profit_factor, 2)],
+                  ["Net profit", `$${fmtNum(metrics.total_pnl, 2)}`],
+                  ["Max drawdown", `${fmtNum(metrics.max_drawdown_pct, 2)}%`],
+                  ["Sharpe (R)", fmtNum(metrics.sharpe_r, 2)],
                 ].map(([k, v]) => (
                   <div key={k} className="flex items-center justify-between text-xs">
                     <span className="text-muted-foreground">{k}</span>
@@ -145,6 +180,49 @@ export default function BacktestingPage() {
           </div>
         </Card>
       </div>
+
+      {result && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <Card title="Equity Curve" subtitle={`${result.symbol} ${result.timeframe} · ${fmtNum(metrics.n_trades, 0)} trades`} className="lg:col-span-2">
+            {equityData ? (
+              <EquityChart data={equityData} height={260} positive={(metrics.final_equity ?? metrics.total_pnl ?? 0) >= 0} />
+            ) : (
+              <div className="py-16 text-center text-xs text-muted-foreground">No equity curve returned</div>
+            )}
+          </Card>
+
+          <Card title="Monte Carlo" subtitle="Resampled outcomes from the trade R-distribution">
+            {mc ? (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2">
+                  <Badge variant={mcPositive ? "profit" : "loss"}>
+                    {mcPositive ? "PASS" : "FAIL"}
+                  </Badge>
+                  <span className="text-[11px] text-muted-foreground">
+                    Gates: ruin &lt; 5%, MC drawdown &lt; 40%
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {mcStats.map(([k, v]) => (
+                    <div key={k} className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">{k}</span>
+                      <span className="font-semibold tabular-nums">{v}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  Drawdown and losing streaks estimated at the 95th percentile across
+                  2,000 bootstrap simulations of your actual trade sequence.
+                </p>
+              </div>
+            ) : (
+              <div className="py-12 text-center text-xs text-muted-foreground">
+                Run a backtest to see Monte Carlo results
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card title="Backtest Queue" subtitle="Running and queued jobs">

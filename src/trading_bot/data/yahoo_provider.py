@@ -13,6 +13,7 @@ call raises ``RuntimeError`` rather than fabricating bars.
 """
 from __future__ import annotations
 
+import datetime
 from collections.abc import Sequence
 from typing import Optional
 
@@ -152,22 +153,31 @@ class YFinanceDataProvider(DataProvider):
         if key in self._cache:
             return self._cache[key]
 
+        # Unspecified window (0/0): default to the trailing 365 days so naive
+        # clients get useful data instead of trying to fetch from epoch 0.
+        start = query.start
+        end = query.end
+        if end == 0:
+            end = int(datetime.datetime.now(tz=datetime.timezone.utc).timestamp())
+        if start == 0:
+            start = end - 365 * 86400
+
         tf = query.timeframe
         if tf in _RESAMPLE_FROM:
             src_tf = _RESAMPLE_FROM[tf]
             src_interval = YF_INTERVAL[src_tf]
-            raw = self._fetch(self._ticker(query.symbol), src_interval, query.start, query.end)
+            raw = self._fetch(self._ticker(query.symbol), src_interval, start, end)
             bars = resample_candles(raw, tf, source=src_tf)
         elif tf in YF_INTERVAL:
-            bars = self._fetch(self._ticker(query.symbol), YF_INTERVAL[tf], query.start, query.end)
+            bars = self._fetch(self._ticker(query.symbol), YF_INTERVAL[tf], start, end)
         else:
             raise RuntimeError(f"timeframe {tf.value} not supported by yfinance provider")
 
         # filter to the requested window (resampled buckets may spill outside)
-        if query.start:
-            bars = [b for b in bars if b.time >= query.start]
-        if query.end:
-            bars = [b for b in bars if b.time <= query.end]
+        if start:
+            bars = [b for b in bars if b.time >= start]
+        if end:
+            bars = [b for b in bars if b.time <= end]
 
         self._cache[key] = bars
         return bars

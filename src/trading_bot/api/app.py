@@ -113,6 +113,7 @@ def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) ->
         from trading_bot.core.enums import Timeframe
         from trading_bot.journal.journal import Journal
         from trading_bot.strategy.base import create_strategy
+        from trading_bot.validation.pipeline import monte_carlo
 
         strategy = create_strategy(req.strategy, params=req.params)
         journal = Journal(store=store.trades, strategy_name=strategy.name, strategy_version=strategy.version)
@@ -126,7 +127,16 @@ def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) ->
             seed=req.seed,
         )
         result = runner.run(strategy, cfg)
-        return result.to_dict()
+        out = result.to_dict()
+        # Monte Carlo resample of the trade R-distribution (deterministic for a
+        # given trade series + seed).
+        r_series = [t.r for t in result.trades]
+        out["monte_carlo"] = monte_carlo(
+            r_series,
+            seed=req.seed or 0,
+            initial_cash=req.initial_cash,
+        )
+        return out
 
     @app.post("/api/review")
     def review(req: ReviewRequest):
