@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, FlaskConical, Play, RefreshCw } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
-import { EquityChart } from "@/components/charts";
+import { EquityChart, MonteCarloChart, WalkForwardChart } from "@/components/charts";
 import { Badge, Card, ProgressBar, StatCard } from "@/components/ui";
 import { getDashboardData } from "@/lib/data";
 
@@ -35,6 +35,7 @@ export default function BacktestingPage() {
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [mcTab, setMcTab] = useState("paths");
 
   useEffect(() => {
     getDashboardData().then(setData).catch(() => setData(null));
@@ -97,6 +98,58 @@ export default function BacktestingPage() {
     ["Worst drawdown (95%)", mc ? `${fmtNum(mc.worst_dd_pct_95, 1)}%` : "—"],
     ["Worst losing streak (95%)", mc ? fmtNum(mc.worst_streak_95, 0) : "—"],
     ["Risk of ruin", mc ? `${fmtNum(mc.risk_of_ruin_pct, 2)}%` : "—"],
+  ];
+
+  // Monte Carlo equity paths, interpolated across the backtest bar span so the
+  // fan chart spans the full period (like the reference dashboards).
+  const mcPaths = useMemo(() => {
+    const paths = mc?.equity_paths || [];
+    const nBars = result?.equity_curve?.length || 0;
+    if (!paths.length || nBars < 2) return null;
+    const steps = Math.min(220, nBars);
+    const rows = [];
+    for (let s = 0; s < steps; s++) {
+      const bar = Math.round((s * (nBars - 1)) / (steps - 1));
+      const row = { bar, pct: Math.round((bar / (nBars - 1)) * 100) };
+      paths.forEach((p, pi) => {
+        const n = p.length - 1;
+        if (n <= 0) {
+          row[`p${pi}`] = Math.round(p[0]);
+          return;
+        }
+        const pos = (bar * n) / (nBars - 1);
+        const j = Math.min(Math.floor(pos), n - 1);
+        row[`p${pi}`] = Math.round(p[j] + (p[j + 1] - p[j]) * (pos - j));
+      });
+      rows.push(row);
+    }
+    const keys = paths.map((_, i) => `p${i}`);
+    rows.forEach((row) => {
+      const vals = keys.map((k) => row[k]).filter((v) => Number.isFinite(v));
+      vals.sort((a, b) => a - b);
+      row.median = vals[Math.floor(vals.length / 2)];
+    });
+    return { rows, keys: [...keys, "median"], initial: Math.round(paths[0][0] || 10000) };
+  }, [mc, result]);
+
+  // Walk-forward analysis derived from the backend's per-segment run.
+  const wf = result?.walk_forward;
+  const wfData = wf?.segments ?? [];
+  const wfPositive = wf?.consistent ?? false;
+  const forwardTest = wf?.generalization_score ?? 0;
+  const mcPass = mc?.pass_rate ?? 0;
+  const combinedScore = Math.round((forwardTest * 0.5 + mcPass * 0.5) * 100) / 100;
+  const wfWindows = [
+    ["Training window", wf?.windows?.training ?? "—"],
+    ["Validation window", wf?.windows?.validation ?? "—"],
+    ["Current performance", wf?.windows?.current_performance ?? "—"],
+    ["Consistency", wf ? `${wf.consistency_pct}%` : "—"],
+    ["Segments", wf ? `${wf.n_windows} rolling windows` : "—"],
+  ];
+  const wfSteps = [
+    ["Combined Score", combinedScore > 0 ? combinedScore.toFixed(2) : "—", "ai"],
+    ["Forward Test", forwardTest > 0 ? (forwardTest / 100).toFixed(2) : "—", "profit"],
+    ["Monte Carlo", mcPass > 0 ? (mcPass / 100).toFixed(2) : "—", "ai"],
   ];
 
   const pipeline = [
@@ -182,46 +235,185 @@ export default function BacktestingPage() {
       </div>
 
       {result && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <Card title="Equity Curve" subtitle={`${result.symbol} ${result.timeframe} · ${fmtNum(metrics.n_trades, 0)} trades`} className="lg:col-span-2">
-            {equityData ? (
-              <EquityChart data={equityData} height={260} positive={(metrics.final_equity ?? metrics.total_pnl ?? 0) >= 0} />
-            ) : (
-              <div className="py-16 text-center text-xs text-muted-foreground">No equity curve returned</div>
-            )}
-          </Card>
+        <>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <Card title="Equity Curve" subtitle={`${result.symbol} ${result.timeframe} · ${fmtNum(metrics.n_trades, 0)} trades`} className="lg:col-span-2">
+              {equityData ? (
+                <EquityChart data={equityData} height={260} positive={(metrics.final_equity ?? metrics.total_pnl ?? 0) >= 0} />
+              ) : (
+                <div className="py-16 text-center text-xs text-muted-foreground">No equity curve returned</div>
+              )}
+            </Card>
 
-          <Card title="Monte Carlo" subtitle="Resampled outcomes from the trade R-distribution">
-            {mc ? (
-              <div className="space-y-4">
-                <div className="flex items-center gap-2">
-                  <Badge variant={mcPositive ? "profit" : "loss"}>
-                    {mcPositive ? "PASS" : "FAIL"}
-                  </Badge>
-                  <span className="text-[11px] text-muted-foreground">
-                    Gates: ruin &lt; 5%, MC drawdown &lt; 40%
-                  </span>
+            <Card title="Monte Carlo Stats" subtitle="Resampled outcomes from the trade R-distribution">
+              {mc ? (
+                <div className="space-y-4">
+                  <div className="flex items-center gap-2">
+                    <Badge variant={mcPositive ? "profit" : "loss"}>
+                      {mcPositive ? "PASS" : "FAIL"}
+                    </Badge>
+                    <span className="text-[11px] text-muted-foreground">
+                      Gates: ruin &lt; 5%, MC drawdown &lt; 40%
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {mcStats.map(([k, v]) => (
+                      <div key={k} className="flex items-center justify-between text-xs">
+                        <span className="text-muted-foreground">{k}</span>
+                        <span className="font-semibold tabular-nums">{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    Drawdown and losing streaks estimated at the 95th percentile across
+                    2,000 bootstrap simulations of your actual trade sequence.
+                  </p>
                 </div>
+              ) : (
+                <div className="py-12 text-center text-xs text-muted-foreground">
+                  Run a backtest to see Monte Carlo results
+                </div>
+              )}
+            </Card>
+          </div>
+
+          <Card
+            title="Monte Carlo Simulation"
+            subtitle={`${mc ? fmtNum(mc.n_sims, 0) : "2,000"} simulations resampled from the actual trade sequence · ${mc ? `${fmtNum(mc.pass_rate, 1)}% pass rate` : "pass rate"}`}
+            action={
+              <div className="flex items-center gap-1 rounded-md bg-muted/30 border border-border/60 p-0.5">
+                {[
+                  ["paths", "Equity Paths"],
+                  ["distribution", "Return Distribution"],
+                ].map(([k, label]) => (
+                  <button
+                    key={k}
+                    onClick={() => setMcTab(k)}
+                    className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors ${
+                      mcTab === k ? "bg-ai text-white" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            }
+          >
+            {mcTab === "paths" ? (
+              mcPaths ? (
                 <div className="space-y-2">
-                  {mcStats.map(([k, v]) => (
-                    <div key={k} className="flex items-center justify-between text-xs">
-                      <span className="text-muted-foreground">{k}</span>
-                      <span className="font-semibold tabular-nums">{v}</span>
-                    </div>
-                  ))}
+                  <MonteCarloChart mode="paths" paths={mcPaths} height={280} />
+                  <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    {fmtNum(mcPaths.keys.length - 1, 0)} simulated equity curves across the backtest period.
+                    The dashed line marks the initial capital; the bold path is the median outcome.
+                  </p>
                 </div>
+              ) : (
+                <div className="py-16 text-center text-xs text-muted-foreground">No equity paths returned</div>
+              )
+            ) : mc?.distribution?.length ? (
+              <div className="space-y-2">
+                <MonteCarloChart mode="distribution" distribution={mc.distribution} height={280} />
                 <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  Drawdown and losing streaks estimated at the 95th percentile across
-                  2,000 bootstrap simulations of your actual trade sequence.
+                  Distribution of final returns across simulations. Median return {fmtNum(mc.median_return_pct, 1)}%,
+                  95% CI {fmtNum(mc.ci_low_pct, 1)}% to {fmtNum(mc.ci_high_pct, 1)}%.
                 </p>
               </div>
             ) : (
-              <div className="py-12 text-center text-xs text-muted-foreground">
-                Run a backtest to see Monte Carlo results
-              </div>
+              <div className="py-16 text-center text-xs text-muted-foreground">No distribution returned</div>
             )}
           </Card>
-        </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <Card
+              title="Walk Forward Analysis"
+              subtitle={`${wf ? `${wf.n_windows} rolling windows · train vs test win rate per segment` : "Rolling window train/test generalization"}`}
+              className="lg:col-span-2"
+            >
+              {wf ? (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between gap-3 rounded-lg bg-muted/20 border border-border/40 px-4 py-3">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Pass Rate</div>
+                      <div className="text-4xl font-bold tabular-nums tracking-tight text-profit">{fmtNum(forwardTest, 0)}%</div>
+                    </div>
+                    <div className="text-right space-y-1">
+                      <div className="flex items-center justify-end gap-2">
+                        <span className="text-[11px] text-muted-foreground">Current Run</span>
+                        <Badge variant={wfPositive ? "profit" : "loss"}>{wfPositive ? "CONSISTENT" : "INCONSISTENT"}</Badge>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground">
+                        Validation {wf.windows?.validation ?? "—"} · {wf.n_windows} segments
+                      </div>
+                    </div>
+                  </div>
+                  <WalkForwardChart data={wfData} height={250} />
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead>
+                        <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground border-b border-border/50">
+                          <th className="py-2 pr-3 font-medium">Segment</th>
+                          <th className="py-2 pr-3 font-medium">Range</th>
+                          <th className="py-2 pr-3 font-medium">Train WR</th>
+                          <th className="py-2 pr-3 font-medium">Test WR</th>
+                          <th className="py-2 pr-3 font-medium">PF</th>
+                          <th className="py-2 pr-3 font-medium">Trades</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wfData.map((s) => (
+                          <tr key={s.segment} className="border-b border-border/30 hover:bg-white/[0.02]">
+                            <td className="py-2.5 pr-3 font-medium text-xs">{s.segment}</td>
+                            <td className="py-2.5 pr-3 text-[11px] text-muted-foreground">{s.range}</td>
+                            <td className="py-2.5 pr-3 font-semibold tabular-nums text-[11px]">{fmtNum(s.train_win_rate, 1)}%</td>
+                            <td className="py-2.5 pr-3 font-semibold tabular-nums text-[11px]">{fmtNum(s.test_win_rate, 1)}%</td>
+                            <td className="py-2.5 pr-3 tabular-nums text-[11px]">{fmtNum(s.test_pf, 2)}</td>
+                            <td className="py-2.5 pr-3 tabular-nums text-[11px]">{fmtNum(s.test_trades, 0)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <div className="py-16 text-center text-xs text-muted-foreground">
+                  Run a backtest to see walk-forward analysis
+                </div>
+              )}
+            </Card>
+
+            <Card title="Walk Forward Windows" subtitle="Configuration for the current run">
+              {wf ? (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    {wfWindows.map(([k, v]) => (
+                      <div key={k} className="flex items-center justify-between text-xs">
+                        <span className="text-muted-foreground">{k}</span>
+                        <span className="font-semibold tabular-nums">{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {wfSteps.map(([label, value, tone]) => (
+                      <div key={label} className="rounded-lg bg-muted/20 border border-border/40 p-3 text-center">
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">{label}</div>
+                        <div className={`text-lg font-bold tabular-nums ${tone === "profit" ? "text-profit" : "text-ai"}`}>{value}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground leading-relaxed">
+                    Combined Score blends the out-of-sample forward-test win rate with the Monte Carlo
+                    pass rate. A consistent strategy keeps train and test win rates close across segments.
+                  </p>
+                </div>
+              ) : (
+                <div className="py-16 text-center text-xs text-muted-foreground">
+                  Run a backtest to see walk-forward windows
+                </div>
+              )}
+            </Card>
+          </div>
+        </>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

@@ -70,6 +70,7 @@ class WalkForwardResult:
     val_pf: list[float] = field(default_factory=list)
     val_win_rate: list[float] = field(default_factory=list)
     val_expectancy_r: list[float] = field(default_factory=list)
+    val_train_win_rate: list[float] = field(default_factory=list)
 
     def consistent(self, min_windows: int = 3, min_trades_per_window: int = 5) -> bool:
         if len(self.windows) < min_windows:
@@ -112,6 +113,7 @@ def run_walk_forward(
         result.val_pf.append(_num(wf_win.val.metrics.get("profit_factor")))
         result.val_win_rate.append(_num(wf_win.val.metrics.get("win_rate")))
         result.val_expectancy_r.append(_num(wf_win.val.metrics.get("expectancy_r")))
+        result.val_train_win_rate.append(_num(wf_win.train.metrics.get("win_rate")))
     return result
 
 
@@ -145,28 +147,42 @@ def monte_carlo(
     initial_cash: float = 10_000.0,
     seed: int = 0,
     risk_per_trade_pct: float = 0.01,
+    return_paths: bool = False,
+    n_paths: int = 50,
+    n_bins: int = 40,
 ) -> dict:
     """Resample the R series to estimate the distribution of outcomes.
 
     Returns percentiles for final equity (via fixed-fractional sizing), max
     drawdown and worst losing streak, plus the ruin probability (equity <= 0).
+    When ``return_paths`` is set it also returns a sample of simulated equity
+    curves (for charting) and a histogram of final returns.
     """
     import numpy as np
 
     if not r_series:
-        return {"n_sims": 0, "median_final_equity": initial_cash, "risk_of_ruin": 0.0,
-                "worst_dd_pct_95": 0.0, "worst_streak_95": 0}
+        return {
+            "n_sims": n_sims, "n_trades": n_trades or 0,
+            "median_final_equity": initial_cash, "risk_of_ruin_pct": 0.0,
+            "worst_dd_pct_95": 0.0, "worst_streak_95": 0,
+            "pass_rate": 0.0, "median_return_pct": 0.0,
+            "ci_low_pct": 0.0, "ci_high_pct": 0.0,
+            "distribution": [], "equity_paths": [],
+        }
     rng = np.random.default_rng(seed)
     n = n_trades or len(r_series)
     finals = np.empty(n_sims)
     max_dd = np.empty(n_sims)
     worst_streak = np.empty(n_sims, dtype=int)
+    path_indices = set(rng.choice(n_sims, size=min(n_paths, n_sims), replace=False)) if return_paths else set()
+    paths: list[list[float]] = []
     for s in range(n_sims):
         sample = rng.choice(r_series, size=n, replace=True)
         equity = initial_cash
         peak = initial_cash
         dd = 0.0
         streak = cur = 0
+        path = [initial_cash] if s in path_indices else None
         for r in sample:
             equity *= 1.0 + r * risk_per_trade_pct
             peak = max(peak, equity)
@@ -176,11 +192,16 @@ def monte_carlo(
             else:
                 cur += 1
             streak = max(streak, cur)
+            if path is not None:
+                path.append(float(equity))
         finals[s] = equity
         max_dd[s] = dd
         worst_streak[s] = streak
+        if path is not None:
+            paths.append(path)
     ruin = float(np.mean(finals <= 0) * 100)
-    return {
+    returns = (finals - initial_cash) / initial_cash * 100
+    out = {
         "n_sims": n_sims,
         "n_trades": n,
         "median_final_equity": float(np.median(finals)),
@@ -189,7 +210,28 @@ def monte_carlo(
         "worst_dd_pct_95": float(np.percentile(max_dd, 95) / initial_cash * 100),
         "worst_streak_95": int(np.percentile(worst_streak, 95)),
         "risk_of_ruin_pct": round(ruin, 3),
+        "pass_rate": float(np.mean(finals > initial_cash) * 100),
+        "median_return_pct": float(np.median(returns)),
+        "ci_low_pct": float(np.percentile(returns, 5)),
+        "ci_high_pct": float(np.percentile(returns, 95)),
     }
+    if return_paths:
+        lo = float(np.min(returns))
+        hi = float(np.max(returns))
+        edge = max((hi - lo) / n_bins, 1e-9)
+        bins = np.linspace(lo, hi, n_bins + 1)
+        counts, _ = np.histogram(returns, bins=bins)
+        out["distribution"] = [
+            {
+                "value": int(round((bins[i] + bins[i + 1]) / 2)),
+                "bin": f"{int(round((bins[i] + bins[i + 1]) / 2))}%",
+                "count": int(counts[i]),
+            }
+            for i in range(n_bins)
+        ]
+        out["equity_paths"] = paths
+        out["n_paths"] = len(paths)
+    return out
 
 
 # ----------------------------------------------------------- promotion gates

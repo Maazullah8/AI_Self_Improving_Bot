@@ -124,6 +124,25 @@ class TestValidation:
         assert "median_final_equity" in a
         assert "risk_of_ruin_pct" in a
 
+    def test_monte_carlo_distribution_and_paths(self):
+        rs = [0.5, -1.0, 0.5, -1.0, 0.6, 0.7]
+        mc = monte_carlo(rs, n_sims=300, seed=1, return_paths=True, n_paths=25)
+        assert "pass_rate" in mc
+        assert 0.0 <= mc["pass_rate"] <= 100.0
+        assert "median_return_pct" in mc
+        assert mc["ci_low_pct"] <= mc["median_return_pct"] <= mc["ci_high_pct"]
+        assert len(mc["distribution"]) == 40
+        assert all("bin" in b and "count" in b for b in mc["distribution"])
+        assert sum(b["count"] for b in mc["distribution"]) == 300
+        assert len(mc["equity_paths"]) == 25
+        assert all(len(p) > 1 for p in mc["equity_paths"])
+
+    def test_monte_carlo_empty_series(self):
+        mc = monte_carlo([], return_paths=True)
+        assert mc["distribution"] == []
+        assert mc["equity_paths"] == []
+        assert mc["median_final_equity"] == 10000.0
+
     def test_monte_carlo_ruin_low_for_positive_series(self):
         rs = [0.5, 0.5, 0.6, 0.4, 0.7, 0.5]
         mc = monte_carlo(rs, n_sims=1000, seed=3)

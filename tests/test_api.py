@@ -109,6 +109,20 @@ class TestApi:
         assert "risk_of_ruin_pct" in mc
         assert "worst_dd_pct_95" in mc
         assert "worst_streak_95" in mc
+        assert "pass_rate" in mc
+        assert "median_return_pct" in mc
+        assert "ci_low_pct" in mc and "ci_high_pct" in mc
+        assert isinstance(mc["distribution"], list) and len(mc["distribution"]) > 0
+        assert isinstance(mc["equity_paths"], list) and len(mc["equity_paths"]) > 0
+        assert all(isinstance(p, list) and p for p in mc["equity_paths"])
+        # walk-forward analysis is included and shaped for the dashboard
+        wf = body["walk_forward"]
+        assert wf is not None
+        assert "generalization_score" in wf
+        assert "segments" in wf and len(wf["segments"]) > 0
+        assert all(
+            "train_win_rate" in s and "test_win_rate" in s for s in wf["segments"]
+        )
         # deterministic for the same trade series + seed
         r2 = client.post("/api/backtest", json={
             "symbol": "EURUSD",
