@@ -16,7 +16,7 @@ from trading_bot.storage.memory import MemoryStore
 
 
 class BacktestRequest(BaseModel):
-    symbol: str = "EURUSD"
+    symbol: str = "XAUUSD"
     timeframe: str = "5m"
     start: int = 0
     end: int = 0
@@ -33,7 +33,7 @@ class ReviewRequest(BaseModel):
     window_end: int = 0
 
 
-def create_app(store: Optional[MemoryStore] = None, provider=None) -> FastAPI:
+def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) -> FastAPI:
     store = store or MemoryStore()
     app = FastAPI(title="Autonomous Trading Bot", version="0.1.0")
     app.add_middleware(
@@ -46,6 +46,15 @@ def create_app(store: Optional[MemoryStore] = None, provider=None) -> FastAPI:
     @app.get("/api/health")
     def health():
         return {"status": "ok", "service": "trading-bot"}
+
+    @app.get("/api/live")
+    def live_status():
+        if live is None:
+            return {"running": False, "detail": "live pipeline not enabled (start with --live)"}
+        try:
+            return live.status()
+        except Exception as e:
+            return {"running": True, "status": "down", "detail": f"status error: {e}"}
 
     @app.get("/api/metrics")
     def metrics():
@@ -134,5 +143,5 @@ def create_app(store: Optional[MemoryStore] = None, provider=None) -> FastAPI:
     return app
 
 
-def make_app(store: Optional[MemoryStore] = None, provider=None) -> FastAPI:
-    return create_app(store=store, provider=provider)
+def make_app(store: Optional[MemoryStore] = None, provider=None, live=None) -> FastAPI:
+    return create_app(store=store, provider=provider, live=live)

@@ -16,8 +16,8 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
-from trading_bot.core.enums import Side
-from trading_bot.core.models import Candle, Order, Position
+from trading_bot.core.enums import ExitReason, PositionStatus, Side
+from trading_bot.core.models import Candle, Order, Position, TradeRecord
 from trading_bot.core.time_utils import utcnow_ts
 from trading_bot.data.base import DataProvider, MarketDataQuery, SymbolInfo
 from trading_bot.execution.executor import Executor
@@ -82,6 +82,7 @@ class LiveTradePipeline:
         risk: Optional[RiskManager] = None,
         store=None,
         config: Optional[LiveConfig] = None,
+        initial_cash: float = 10_000.0,
     ):
         self.provider = provider
         self.strategy = strategy
@@ -92,6 +93,10 @@ class LiveTradePipeline:
         self.state = LiveState()
         self._bars: list[Candle] = []
         self._positions: list[Position] = []
+        self._closed: list[TradeRecord] = []
+        self._balance = initial_cash
+        self._realized = 0.0
+        self._extremes: dict[str, tuple[float, float]] = {}
 
     # ------------------------------------------------------------- poll
     def poll(self, now: Optional[int] = None) -> LiveState:
@@ -121,6 +126,7 @@ class LiveTradePipeline:
         for bar in new_bars:
             self._bars.append(bar)
             self.state.last_bar_time = bar.time
+            self._manage_positions(bar)
             ctx = LiveContext(
                 self._bars,
                 len(self._bars) - 1,
@@ -226,12 +232,158 @@ class LiveTradePipeline:
             self.state.n_errors += 1
 
     def _equity(self) -> float:
+        open_pnl = sum(self._pnl(p, self._last_close()) for p in self._positions if p.status == PositionStatus.OPEN)
+        return self._balance + open_pnl
+
+    def _last_close(self) -> float:
+        return self._bars[-1].close if self._bars else 0.0
+
+    def _contract_size(self) -> float:
         try:
-            info = self.executor.health()
-            account = info.get("balance")
-            return float(account) if account else 10_000.0
+            return self.provider.symbol_info(self.config.symbol).contract_size or 1.0
         except Exception:
-            return 10_000.0
+            return 1.0
+
+    def _pnl(self, pos: Position, price: float) -> float:
+        if pos.side is Side.BUY:
+            return (price - pos.open_price) * pos.size * self._contract_size()
+        return (pos.open_price - price) * pos.size * self._contract_size()
+
+    # ------------------------------------------------------ position mgmt
+    def _check_exit(self, pos: Position, bar: Candle) -> tuple[Optional[float], Optional[ExitReason]]:
+        """Conservative SL/TP: on a same-bar double breach assume SL first."""
+        if pos.side is Side.BUY:
+            sl_hit = pos.sl and bar.low <= pos.sl
+            tp_hit = pos.tp and bar.high >= pos.tp
+            if sl_hit and tp_hit:
+                return pos.sl, ExitReason.SL
+            if sl_hit:
+                return pos.sl, ExitReason.SL
+            if tp_hit:
+                return pos.tp, ExitReason.TP
+        else:
+            sl_hit = pos.sl and bar.high >= pos.sl
+            tp_hit = pos.tp and bar.low <= pos.tp
+            if sl_hit and tp_hit:
+                return pos.sl, ExitReason.SL
+            if sl_hit:
+                return pos.sl, ExitReason.SL
+            if tp_hit:
+                return pos.tp, ExitReason.TP
+        return None, None
+
+    def _track_extremes(self, pos: Position, bar: Candle) -> None:
+        best, worst = self._extremes.get(pos.id, (pos.open_price, pos.open_price))
+        if pos.side is Side.BUY:
+            best = max(best, bar.high)
+            worst = min(worst, bar.low)
+        else:
+            best = min(best, bar.low)
+            worst = max(worst, bar.high)
+        self._extremes[pos.id] = (best, worst)
+
+    def _manage_positions(self, bar: Candle) -> None:
+        for pos in list(self._positions):
+            if pos.status != PositionStatus.OPEN:
+                continue
+            self._track_extremes(pos, bar)
+            exit_price, reason = self._check_exit(pos, bar)
+            if exit_price is not None:
+                self._close_position(pos, exit_price, bar.time, reason)
+
+    def _close_position(self, pos: Position, exit_price: float, exit_time: int, reason: ExitReason) -> None:
+        self.executor.close_position(pos)
+        pnl = self._pnl(pos, exit_price)
+        self._realized += pnl
+        self._balance += pnl
+        self._positions = [p for p in self._positions if p.id != pos.id]
+        rec = self._journal_trade(pos, exit_price, exit_time, reason, pnl)
+        self._closed.append(rec)
+        if self.store is not None and hasattr(self.store, "trades"):
+            try:
+                self.store.trades.insert(rec)
+            except Exception:
+                pass
+
+    def _journal_trade(self, pos: Position, exit_price: float, exit_time: int, reason: ExitReason, pnl: float) -> TradeRecord:
+        risk_points = abs(pos.open_price - pos.sl)
+        risk_units = risk_points * pos.size * self._contract_size() if risk_points > 0 else 0.0
+        r = pnl / risk_units if risk_units > 0 else 0.0
+        best, worst = self._extremes.get(pos.id, (pos.open_price, pos.open_price))
+        mfe = (best - pos.open_price) if pos.side is Side.BUY else (pos.open_price - best)
+        mae = (pos.open_price - worst) if pos.side is Side.BUY else (worst - pos.open_price)
+        mfe_r = mfe / risk_points if risk_points > 0 else 0.0
+        mae_r = mae / risk_points if risk_points > 0 else 0.0
+        rr = 0.0
+        if pos.sl != pos.open_price:
+            rr = abs(pos.tp - pos.open_price) / abs(pos.sl - pos.open_price) if pos.tp else 0.0
+        return TradeRecord(
+            trade_id=pos.id,
+            strategy=pos.strategy or self.strategy.name,
+            strategy_version=pos.strategy_version or self.strategy.version,
+            symbol=pos.symbol,
+            side=pos.side,
+            entry_time=pos.open_time,
+            exit_time=exit_time,
+            duration_seconds=max(exit_time - pos.open_time, 0),
+            entry_price=pos.open_price,
+            exit_price=exit_price,
+            size=pos.size,
+            sl=pos.sl,
+            tp=pos.tp,
+            rr=rr,
+            pnl=pnl,
+            pnl_points=(exit_price - pos.open_price) * (1 if pos.side is Side.BUY else -1),
+            r=r,
+            mfe=mfe_r,
+            mae=mae_r,
+            exit_reason=reason,
+        )
+
+    # ----------------------------------------------------------- status
+    def status(self) -> dict:
+        """Snapshot for the dashboard (open positions, equity, counters)."""
+        sym = self.provider.symbol_info(self.config.symbol)
+        open_positions = []
+        last = self._last_close()
+        for p in self._positions:
+            if p.status != PositionStatus.OPEN:
+                continue
+            open_positions.append(
+                {
+                    "id": p.id,
+                    "symbol": p.symbol,
+                    "side": p.side.value,
+                    "entry_price": p.open_price,
+                    "current_price": last,
+                    "sl": p.sl,
+                    "tp": p.tp,
+                    "size": p.size,
+                    "open_time": p.open_time,
+                    "unrealized_pnl": self._pnl(p, last),
+                }
+            )
+        return {
+            "running": True,
+            "symbol": self.config.symbol,
+            "timeframe": self.config.timeframe,
+            "strategy": self.strategy.name,
+            "strategy_version": self.strategy.version,
+            "status": self.state.status,
+            "detail": self.state.detail,
+            "balance": round(self._balance, 2),
+            "equity": round(self._equity(), 2),
+            "realized_pnl": round(self._realized, 2),
+            "open_positions": open_positions,
+            "last_price": last,
+            "n_trades": len(self._closed),
+            "n_signals": self.state.n_signals,
+            "n_polls": self.state.n_polls,
+            "n_rejections": self.state.n_rejections,
+            "last_bar_time": self.state.last_bar_time,
+            "digits": sym.digits,
+            "point_size": sym.point_size,
+        }
 
     # -------------------------------------------------------------- store
     def _record_signal(self, signal: Signal, status: str, reject_reason: str) -> None:

@@ -1,31 +1,87 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, Crosshair, Timer } from "lucide-react";
+import { Activity, Crosshair, RefreshCw, Timer } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
 import { Badge, Card, StatCard } from "@/components/ui";
-import { getDashboardData } from "@/lib/data";
+import { getDashboardData, getLive } from "@/lib/data";
 
 function fmtNum(v, digits = 2) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
   return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
+const POLL_MS = 10000;
+
 export default function LiveTradesPage() {
-  const [data, setData] = useState(null);
+  const [live, setLive] = useState(null);
+  const [demo, setDemo] = useState(null);
 
   useEffect(() => {
-    getDashboardData().then(setData).catch(() => setData(null));
+    let cancelled = false;
+    const load = async () => {
+      const [l, d] = await Promise.all([getLive(), getDashboardData()]);
+      if (!cancelled) {
+        setLive(l);
+        setDemo(d);
+      }
+    };
+    load();
+    const id = setInterval(load, POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
+
+  const online = live?.online;
+  const positions = online ? live.positions : demo?.livePositions || [];
+  const statusTone =
+    live?.status === "down" ? "loss" : live?.status === "warn" ? "warn" : "profit";
 
   return (
     <AppShell>
+      <Card title="Live Pipeline" subtitle="Paper-trading engine state (never real money)">
+        <div className="flex flex-wrap items-center gap-4 text-sm">
+          {online ? (
+            <>
+              <Badge variant={statusTone}>{live.status.toUpperCase()}</Badge>
+              <span className="text-muted-foreground">
+                <span className="font-semibold text-foreground">{live.symbol}</span>{" "}
+                {live.timeframe} · {live.strategy} v{live.strategyVersion || "?"}
+              </span>
+              <span className="text-muted-foreground">
+                Balance <span className="font-mono tabular-nums text-foreground">${fmtNum(live.balance, 2)}</span>
+              </span>
+              <span className="text-muted-foreground">
+                Equity <span className="font-mono tabular-nums text-foreground">${fmtNum(live.equity, 2)}</span>
+              </span>
+              <span className="text-muted-foreground">
+                Realized{" "}
+                <span className={`font-mono tabular-nums ${live.realizedPnl >= 0 ? "text-profit" : "text-loss"}`}>
+                  {live.realizedPnl >= 0 ? "+" : ""}${fmtNum(live.realizedPnl, 2)}
+                </span>
+              </span>
+              <span className="text-muted-foreground">Last bar {fmtNum(live.lastPrice, live.lastPrice < 10 ? 5 : 3)}</span>
+              <span className="text-xs text-muted-foreground flex items-center gap-1">
+                <RefreshCw className="size-3 animate-spin" /> auto-refresh {POLL_MS / 1000}s
+              </span>
+            </>
+          ) : (
+            <span className="text-muted-foreground">
+              Live pipeline not running — start the server with <code className="font-mono text-xs">--live</code>.
+              {live?.detail ? ` (${live.detail})` : ""}
+            </span>
+          )}
+        </div>
+      </Card>
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Total Trades" value={data ? fmtNum(data.cards.totalTrades ?? 2810, 0) : "—"} subvalue="All time" icon={<Activity className="size-4" />} />
-        <StatCard label="Win Rate" value={data ? `${fmtNum(data.cards.winRate, 1)}%` : "—"} subvalue="Live account" variant="profit" />
-        <StatCard label="Net P&L" value={data ? `$${fmtNum(data.cards.todayPnL, 0)}` : "—"} subvalue="Total realized" variant={data && data.cards.todayPnL >= 0 ? "profit" : "loss"} />
-        <StatCard label="Max Drawdown" value={data ? `${fmtNum(data.cards.maxDrawdown, 1)}%` : "—"} subvalue="Threshold: -10%" variant={data && Math.abs(data.cards.maxDrawdown) > 10 ? "loss" : "default"} />
+        <StatCard label="Total Trades" value={fmtNum(online ? live.nTrades : demo?.cards.totalTrades ?? 2810, 0)} subvalue="All time" icon={<Activity className="size-4" />} />
+        <StatCard label="Signals" value={fmtNum(online ? live.nSignals : demo?.cards.totalTrades ?? 0, 0)} subvalue="Generated" />
+        <StatCard label="Net P&L" value={online ? `${live.realizedPnl >= 0 ? "+" : ""}$${fmtNum(live.realizedPnl, 0)}` : `$${fmtNum(demo?.cards.todayPnL ?? 0, 0)}`} subvalue={online ? "Realized" : "Today (demo)"} variant={(online ? live.realizedPnl : demo?.cards.todayPnL) >= 0 ? "profit" : "loss"} />
+        <StatCard label="Pipeline" value={online ? live.status.toUpperCase() : "OFF"} subvalue={online ? live.detail : "not running"} variant={statusTone} />
       </div>
 
       <Card title="Open Positions" subtitle="Real-time unrealized performance">
@@ -45,7 +101,7 @@ export default function LiveTradesPage() {
               </tr>
             </thead>
             <tbody>
-              {(data?.livePositions || []).map((p) => {
+              {positions.map((p) => {
                 const long = p.direction === "LONG";
                 const green = p.pnl >= 0;
                 return (
@@ -73,7 +129,7 @@ export default function LiveTradesPage() {
               })}
             </tbody>
           </table>
-          {!data?.livePositions?.length && (
+          {!positions.length && (
             <div className="flex flex-col items-center gap-2 py-16 text-muted-foreground">
               <Crosshair className="size-6" />
               <p className="text-xs">No open positions</p>

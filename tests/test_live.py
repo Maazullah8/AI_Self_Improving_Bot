@@ -103,6 +103,119 @@ class TestLivePipeline:
         assert store.heartbeats.latest("live:EURUSD") is not None
 
 
+class TestLivePipelinePositionManagement:
+    """SL/TP closes + journaling to the store (added for live trading)."""
+
+    def _pipe(self, store=None):
+        from trading_bot.core.enums import Timeframe
+
+        p = SyntheticDataProvider(
+            symbol="EURUSD", seed=9,
+            start=utc_ts(2023, 3, 1), end=utc_ts(2023, 3, 2),
+            tf=Timeframe.M5, initial_price=1.1, volatility=0.0004,
+        )
+        return LiveTradePipeline(
+            provider=p, strategy=create_strategy("smc_crt"),
+            executor=SimulatedExecutor(), store=store or MemoryStore(),
+            config=LiveConfig(symbol="EURUSD", timeframe="5m"),
+        )
+
+    def _pos(self, side=Side.BUY, sl=1.09, tp=1.12):
+        return Position(
+            id="p1", symbol="EURUSD", side=side, size=0.1,
+            open_price=1.10, open_time=utc_ts(2023, 3, 1, 10, 0),
+            sl=sl, tp=tp, strategy="smc_crt", strategy_version="v1.0",
+        )
+
+    def _bar(self, t, o, h, l, c):
+        from trading_bot.core.models import Candle
+
+        return Candle(time=t, open=o, high=h, low=l, close=c, volume=100, spread=0)
+
+    def test_sl_hit_closes_and_journals(self):
+        from trading_bot.core.enums import ExitReason
+
+        store = MemoryStore()
+        pipe = self._pipe(store)
+        pipe._bars = [self._bar(utc_ts(2023, 3, 1, 10, 0), 1.10, 1.105, 1.095, 1.10)]
+        pipe._positions.append(self._pos())
+        bar = self._bar(utc_ts(2023, 3, 1, 10, 5), 1.09, 1.095, 1.085, 1.09)
+        pipe._manage_positions(bar)
+        assert pipe._positions == []
+        assert pipe._balance == pytest.approx(10_000 - 0.1 * 100_000 * 0.01)  # -$100
+        trades = store.trades.list()
+        assert len(trades) == 1
+        assert trades[0].exit_reason == ExitReason.SL
+        assert trades[0].pnl == pytest.approx(-100.0)
+        assert trades[0].entry_price == 1.10 and trades[0].exit_price == 1.09
+        # R multiple: risk = (1.10-1.09)*0.1*100000 = 100 => r = -1
+        assert trades[0].r == pytest.approx(-1.0)
+        assert trades[0].strategy == "smc_crt"
+
+    def test_tp_hit_closes_short(self):
+        from trading_bot.core.enums import ExitReason
+
+        store = MemoryStore()
+        pipe = self._pipe(store)
+        pipe._bars = [self._bar(utc_ts(2023, 3, 1, 10, 0), 1.10, 1.105, 1.095, 1.10)]
+        pipe._positions.append(self._pos(side=Side.SELL, sl=1.11, tp=1.08))
+        bar = self._bar(utc_ts(2023, 3, 1, 10, 5), 1.09, 1.095, 1.075, 1.08)
+        pipe._manage_positions(bar)
+        trades = store.trades.list()
+        assert len(trades) == 1
+        assert trades[0].exit_reason == ExitReason.TP
+        # short: (1.10 - 1.08)*0.1*100000 = +$200
+        assert trades[0].pnl == pytest.approx(200.0)
+
+    def test_double_breach_assumes_sl(self):
+        from trading_bot.core.enums import ExitReason
+
+        store = MemoryStore()
+        pipe = self._pipe(store)
+        pipe._bars = [self._bar(utc_ts(2023, 3, 1, 10, 0), 1.10, 1.105, 1.095, 1.10)]
+        pipe._positions.append(self._pos(sl=1.09, tp=1.12))
+        bar = self._bar(utc_ts(2023, 3, 1, 10, 5), 1.11, 1.125, 1.085, 1.11)
+        pipe._manage_positions(bar)
+        trades = store.trades.list()
+        assert len(trades) == 1
+        assert trades[0].exit_reason == ExitReason.SL
+        assert trades[0].exit_price == pytest.approx(1.09)
+
+    def test_no_exit_within_sl_tp_keeps_position(self):
+        store = MemoryStore()
+        pipe = self._pipe(store)
+        pipe._bars = [self._bar(utc_ts(2023, 3, 1, 10, 0), 1.10, 1.105, 1.095, 1.10)]
+        pipe._positions.append(self._pos())
+        bar = self._bar(utc_ts(2023, 3, 1, 10, 5), 1.105, 1.115, 1.097, 1.11)
+        pipe._manage_positions(bar)
+        assert len(pipe._positions) == 1
+        assert store.trades.list() == []
+
+    def test_status_snapshot(self):
+        store = MemoryStore()
+        pipe = self._pipe(store)
+        pipe._bars = [self._bar(utc_ts(2023, 3, 1, 10, 0), 1.10, 1.105, 1.095, 1.10)]
+        pipe._positions.append(self._pos())
+        status = pipe.status()
+        assert status["running"] is True
+        assert status["symbol"] == "EURUSD"
+        assert len(status["open_positions"]) == 1
+        assert status["open_positions"][0]["side"] == "buy"
+        assert status["balance"] == pytest.approx(10_000.0)
+
+    def test_close_updates_equity_and_realized(self):
+        store = MemoryStore()
+        pipe = self._pipe(store)
+        pipe._bars = [self._bar(utc_ts(2023, 3, 1, 10, 0), 1.10, 1.105, 1.095, 1.10)]
+        pipe._positions.append(self._pos(sl=1.11, tp=1.10))  # instant TP at 1.10?
+        bar = self._bar(utc_ts(2023, 3, 1, 10, 5), 1.13, 1.135, 1.125, 1.13)
+        pipe._manage_positions(bar)
+        assert pipe._realized == pytest.approx(0.1 * 100_000 * 0.0)  # tp=1.10, exit at 1.10
+        st = pipe.status()
+        assert st["realized_pnl"] == pytest.approx(0.0)
+        assert st["n_trades"] == 1
+
+
 class TestSupervisor:
     def test_detects_stale_and_restarts(self):
         from trading_bot.core.enums import Timeframe

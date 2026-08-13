@@ -43,6 +43,9 @@ source .venv/bin/activate      # macOS / Linux
 
 # install backend + API dependencies
 pip install -e ".[api,dev]"
+
+# optional: real market data via yfinance (free, cross-platform)
+pip install -e ".[yfinance]"
 ```
 
 ## 4. Set up the dashboard
@@ -60,6 +63,22 @@ cd ..
 python -m trading_bot.api.run
 ```
 
+The server auto-detects the data source:
+- **yfinance installed** → live Yahoo data (default symbol **XAUUSD**)
+- otherwise → a deterministic synthetic demo feed (UI still works)
+
+Useful flags:
+```bash
+# force the demo feed
+python -m trading_bot.api.run --provider synthetic
+
+# run a backtest + AI review at startup so the dashboard isn't empty
+python -m trading_bot.api.run --seed-demo
+
+# start a PAPER live pipeline (simulated executor, never real money)
+python -m trading_bot.api.run --live --symbol XAUUSD --timeframe 5m
+```
+
 You should see `Uvicorn running on http://0.0.0.0:8000`.
 **Keep this terminal open.**
 
@@ -69,7 +88,7 @@ In a second terminal, once the backend is up:
 
 ```bash
 curl -s -X POST http://localhost:8000/api/backtest -H "Content-Type: application/json" \
-  -d '{"symbol":"EURUSD","timeframe":"5m","start":0,"end":0,"initial_cash":10000,"strategy":"smc_crt","params":{"htf":"4h","zone_tf":"4h","ltf":"5m"},"seed":42}'
+  -d '{"symbol":"XAUUSD","timeframe":"5m","start":0,"end":0,"initial_cash":10000,"strategy":"smc_crt","params":{"htf":"4h","zone_tf":"4h","ltf":"5m"},"seed":42}'
 
 curl -s -X POST http://localhost:8000/api/review -H "Content-Type: application/json" \
   -d '{"strategy":"smc_crt","strategy_version":"v1.0"}'
@@ -154,3 +173,80 @@ To execute signals on a MT5 demo account you'd wire `MT5Executor(login=...,
 password=..., server=...)` into the live pipeline instead of the simulated
 executor. **Never use a real-money account without fully reviewing the
 validation gates** — see the strategy promotion workflow in `README.md`.
+
+---
+
+## Backtesting on free Yahoo Finance data (yfinance)
+
+No Windows, no MT5 terminal — works on macOS, Windows and Linux. Pulls OHLCV
+bars straight from Yahoo Finance.
+
+```bash
+pip install -e ".[yfinance]"
+```
+
+### Run a backtest on XAUUSD (gold)
+
+```bash
+python -m examples.backtest_yahoo --symbol XAUUSD --timeframe 1h \
+    --start 2024-01-01 --end 2024-06-30 --initial-cash 10000
+```
+
+Output includes bars analyzed, trades, win rate, profit factor, net profit,
+max drawdown and Sharpe. `--timeframe` accepts `1m, 3m, 5m, 15m, 30m, 1h,
+4h, 1d, 1w, 1mo`. Supported symbols: `XAUUSD` (gold), `XAGUSD` (silver),
+`SPX`, `NAS100`, `BTCUSD`, `ETHUSD`, plus any Yahoo ticker passed through
+(e.g. `EURUSD=X`).
+
+> **About XAUUSD on Yahoo**: Yahoo has no spot-gold ticker, so the provider
+> maps `XAUUSD → GC=F` (front-month COMEX gold futures) — the closest
+> freely-available series. See the docstring in
+> `src/trading_bot/data/yahoo_provider.py`.
+
+---
+
+## Live (paper) trading with XAUUSD
+
+The live pipeline is **fail-closed and paper-only by default**: it reads live
+bars, runs the strategy, and executes through a `SimulatedExecutor` that never
+touches a real account.
+
+```bash
+python -m trading_bot.api.run --live --symbol XAUUSD --timeframe 5m --poll-seconds 30
+```
+
+- Open the dashboard's **Live Trades** page — it auto-refreshes every 10s and
+  shows pipeline status, balance/equity, realized P&L and open positions.
+- Positions are managed bar-by-bar: **SL / TP are checked on every new bar**
+  (conservative SL-first on same-bar double breach) and closed trades are
+  journaled, so they flow into Analytics, Trade History and AI Review.
+- `/api/live` exposes the full snapshot for the dashboard.
+
+### Live from the API (same code, different executor)
+
+To execute on a real (or MT5 demo) account, swap the executor in
+`src/trading_bot/api/run.py` from `SimulatedExecutor` to `MT5Executor(login=...,
+password=..., server=...)`. The strategy, risk and journaling are identical.
+
+**Never run this on a real-money account until the promotion gates pass** and
+you've reviewed the AI feedback (see `README.md`). The pipeline will refuse to
+trade on stale data, strategy errors, or an unhealthy broker — but that's a
+safety net, not a substitute for validation.
+
+---
+
+## Where to change the trading symbol (XAUUSD → something else)
+
+1. **Backend / live data** — `src/trading_bot/api/run.py`:
+   - default `--symbol` is `XAUUSD`; pass `--symbol EURUSD` (or `XAGUSD`,
+     `BTCUSD`, …) to the `python -m trading_bot.api.run` command.
+2. **Dashboard backtest** — `dashboard/app/backtesting/page.js` line ~47:
+   `symbol: "XAUUSD"` (the body of the `POST /api/backtest` request).
+3. **Backtest API default** — `src/trading_bot/api/app.py`:
+   `BacktestRequest.symbol = "XAUUSD"`.
+4. **CLI backtests** — `examples/backtest_yahoo.py` / `examples/backtest_mt5.py`:
+   the `--symbol` flag.
+5. **MT5-only symbols** — `MT5DataProvider` uses the symbol as-is, so a custom
+   broker symbol (e.g. `XAUUSD.m`) must match what appears in your MT5
+   Market Watch.
+

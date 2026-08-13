@@ -42,6 +42,37 @@ class TestApi:
         r = client.get("/api/strategies")
         assert r.status_code == 200
 
+    def test_live_disabled_by_default(self, client):
+        r = client.get("/api/live")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["running"] is False
+
+    def test_live_enabled_returns_status(self):
+        from trading_bot.execution.executor import SimulatedExecutor
+        from trading_bot.live.pipeline import LiveConfig, LiveTradePipeline
+        from trading_bot.strategy.base import create_strategy
+
+        store = MemoryStore()
+        provider = SyntheticDataProvider(
+            symbol="XAUUSD", seed=5,
+            start=utc_ts(2024, 1, 1), end=utc_ts(2024, 2, 1),
+            tf=Timeframe.M5, initial_price=2050.0, volatility=0.0005,
+        )
+        pipe = LiveTradePipeline(
+            provider=provider, strategy=create_strategy("smc_crt"),
+            executor=SimulatedExecutor(), store=store,
+            config=LiveConfig(symbol="XAUUSD", timeframe="5m"),
+        )
+        app = make_app(store=store, provider=provider, live=pipe)
+        r = TestClient(app).get("/api/live")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["running"] is True
+        assert body["symbol"] == "XAUUSD"
+        assert body["strategy"] == "smc_crt"
+        assert body["open_positions"] == []
+
     def test_backtest_endpoint(self, client):
         r = client.post("/api/backtest", json={
             "symbol": "EURUSD",

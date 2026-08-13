@@ -44,7 +44,7 @@ export default function BacktestingPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          symbol: "EURUSD",
+          symbol: "XAUUSD",
           timeframe: "5m",
           start: 0,
           end: 0,
@@ -111,7 +111,7 @@ export default function BacktestingPage() {
               className="flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-ai text-white text-xs font-medium hover:bg-ai/90 disabled:opacity-50 transition-colors"
             >
               {running ? <RefreshCw className="size-4 animate-spin" /> : <Play className="size-4" />}
-              {running ? "Running backtest…" : "Run backtest (EURUSD, smc_crt)"}
+              {running ? "Running backtest…" : "Run backtest (XAUUSD, smc_crt)"}
             </button>
             {error && (
               <div className="rounded-md bg-loss/10 border border-loss/30 p-3 text-xs text-loss">

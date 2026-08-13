@@ -78,6 +78,50 @@ export async function getReviews() {
   }
 }
 
+// Normalize the /api/live endpoint into the shape the Live Trades page uses.
+// Open positions map to the demo `livePositions` schema (pair/direction/pnl).
+export async function getLive() {
+  try {
+    const l = await fetchJSON("/api/live");
+    if (!l || l.running === false) {
+      return { online: false, running: false, detail: l?.detail || "not enabled", positions: [] };
+    }
+    const positions = (l.open_positions || []).map((p) => ({
+      id: p.id,
+      pair: p.symbol,
+      direction: p.side === "buy" ? "LONG" : "SHORT",
+      entryPrice: p.entry_price,
+      currentPrice: p.current_price,
+      sl: p.sl,
+      tp: p.tp,
+      lot: p.size,
+      pnl: p.unrealized_pnl ?? 0,
+      duration: p.open_time
+        ? `${Math.max(1, Math.round((Date.now() / 1000 - p.open_time) / 60))}m`
+        : "—",
+    }));
+    return {
+      online: true,
+      running: true,
+      symbol: l.symbol,
+      timeframe: l.timeframe,
+      strategy: l.strategy,
+      status: l.status,
+      detail: l.detail,
+      balance: l.balance,
+      equity: l.equity,
+      realizedPnl: l.realized_pnl,
+      lastPrice: l.last_price,
+      nTrades: l.n_trades,
+      nSignals: l.n_signals,
+      nRejections: l.n_rejections,
+      positions,
+    };
+  } catch {
+    return { online: false, running: false, positions: [] };
+  }
+}
+
 // Build an equity curve from trades: start at INITIAL_CASH, add each trade's
 // net P/L in exit-time order.
 export function equityFromTrades(trades, initial = INITIAL_CASH) {

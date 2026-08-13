@@ -15,6 +15,11 @@ from trading_bot.data.resample import (
     resample_candles,
 )
 from trading_bot.data.synthetic import SyntheticDataProvider, generate_csv
+from trading_bot.data.yahoo_provider import (
+    DEFAULT_SYMBOL,
+    YFinanceDataProvider,
+    yfinance_available,
+)
 
 __all__ = [
     "DataProvider",
@@ -28,6 +33,9 @@ __all__ = [
     "mt5_available",
     "SyntheticDataProvider",
     "generate_csv",
+    "YFinanceDataProvider",
+    "yfinance_available",
+    "DEFAULT_SYMBOL",
     "aggregate_ticks_to_candles",
     "build_candle_timeframe",
     "resample_candles",
