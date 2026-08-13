@@ -52,7 +52,14 @@ def create_app(store: Optional[MemoryStore] = None, provider=None) -> FastAPI:
         from trading_bot.backtest.metrics import compute_metrics
 
         trades = store.trades.list(limit=1000)
-        eq = [{"time": t.exit_time, "equity": 0.0} for t in trades]
+        # Reconstruct the equity curve from the journal: start at a nominal
+        # initial balance and apply each trade's net P/L in exit-time order.
+        initial = 10_000.0
+        eq = [{"time": 0, "equity": initial}]
+        running = initial
+        for t in sorted(trades, key=lambda x: x.exit_time):
+            running += t.pnl
+            eq.append({"time": t.exit_time, "equity": running})
         return compute_metrics(eq, trades)
 
     @app.get("/api/trades")
