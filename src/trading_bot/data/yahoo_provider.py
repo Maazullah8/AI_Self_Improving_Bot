@@ -202,3 +202,7 @@ class YFinanceDataProvider(DataProvider):
 
     def clear(self) -> None:
         self._cache.clear()
+
+    def resample(self, timeframe: Timeframe) -> "YFinanceDataProvider":
+        """Yahoo is already multi-timeframe (cached per symbol/timeframe)."""
+        return self

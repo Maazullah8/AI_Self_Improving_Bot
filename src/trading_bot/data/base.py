@@ -61,6 +61,15 @@ class DataProvider(ABC):
     def symbol_info(self, symbol: str) -> SymbolInfo:
         ...
 
+    def resample(self, timeframe: Timeframe) -> "DataProvider":
+        """Return a provider serving bars at ``timeframe``.
+
+        Default: a provider that is already multi-timeframe returns ``self``.
+        Single-timeframe providers (e.g. synthetic) build a fresh instance.
+        Used by walk-forward analysis to keep large-range runs bounded.
+        """
+        return self
+
 
 class CachedDataProvider(DataProvider):
     """Wrapper that caches loaded bars in memory for repeated access."""

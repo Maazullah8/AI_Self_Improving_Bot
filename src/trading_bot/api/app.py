@@ -33,6 +33,15 @@ class ReviewRequest(BaseModel):
     window_end: int = 0
 
 
+class ModelConfigRequest(BaseModel):
+    provider: str = "openai"  # ollama|openai|openrouter|groq|anthropic|gemini|custom
+    label: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    is_active: bool = False
+
+
 def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) -> FastAPI:
     store = store or MemoryStore()
     app = FastAPI(title="Autonomous Trading Bot", version="0.1.0")
@@ -105,6 +114,77 @@ def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) ->
     def reviews(strategy: Optional[str] = None, limit: int = Query(50, ge=1, le=1000)):
         return [r.__dict__ for r in store.reviews.list(strategy=strategy, limit=limit)]
 
+    @app.get("/api/data-range")
+    def data_range(symbol: str = "XAUUSD", timeframe: str = "5m"):
+        """The provider's available date span for the requested symbol/timeframe."""
+        if provider is None:
+            raise HTTPException(503, "no data provider configured")
+        from trading_bot.core.enums import Timeframe
+        from trading_bot.data.base import MarketDataQuery
+
+        tf = Timeframe(timeframe)
+        try:
+            bars = provider.resample(tf).load_candles(
+                MarketDataQuery(symbol=symbol, timeframe=tf)
+            )
+        except Exception as e:
+            raise HTTPException(503, f"provider error: {e}")
+        if not bars:
+            return {"symbol": symbol, "timeframe": timeframe, "start": 0, "end": 0, "n_bars": 0}
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "start": bars[0].time,
+            "end": bars[-1].time,
+            "n_bars": len(bars),
+        }
+
+    @app.get("/api/models")
+    def models_list():
+        return [m.to_dict() for m in store.models.list()]
+
+    @app.post("/api/models")
+    def models_upsert(req: ModelConfigRequest):
+        from trading_bot.storage.interfaces import ModelConfigRecord
+
+        rec = store.models.upsert(
+            ModelConfigRecord(
+                provider=req.provider,
+                label=req.label or req.provider,
+                base_url=req.base_url,
+                api_key=req.api_key,
+                model=req.model,
+                is_active=req.is_active,
+            )
+        )
+        return rec.to_dict()
+
+    @app.delete("/api/models/{model_id}")
+    def models_delete(model_id: str):
+        if not store.models.delete(model_id):
+            raise HTTPException(404, "model not found")
+        return {"ok": True}
+
+    @app.post("/api/models/{model_id}/activate")
+    def models_activate(model_id: str):
+        rec = store.models.set_active(model_id)
+        if rec is None:
+            raise HTTPException(404, "model not found")
+        return rec.to_dict()
+
+    @app.post("/api/models/{model_id}/test")
+    def models_test(model_id: str):
+        """Probe the model server (Ollama or an online API key endpoint)."""
+        from trading_bot.ai.llm import llm_from_config
+
+        rec = store.models.get(model_id)
+        if rec is None:
+            raise HTTPException(404, "model not found")
+        llm = llm_from_config(rec)
+        if llm is None:
+            return {"ok": False, "error": "model is not configured (missing API key / model name)"}
+        return llm.ping()
+
     @app.post("/api/backtest")
     def backtest(req: BacktestRequest):
         if provider is None:
@@ -117,10 +197,13 @@ def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) ->
 
         strategy = create_strategy(req.strategy, params=req.params)
         journal = Journal(store=store.trades, strategy_name=strategy.name, strategy_version=strategy.version)
-        runner = BacktestRunner(provider, journal=journal)
+        tf = Timeframe(req.timeframe)
+        # Honor the requested timeframe: multi-timeframe providers return self,
+        # single-timeframe providers (synthetic) resample to the target bars.
+        runner = BacktestRunner(provider.resample(tf), journal=journal)
         cfg = BacktestConfig(
             symbol=req.symbol,
-            timeframe=Timeframe(req.timeframe),
+            timeframe=tf,
             start=req.start,
             end=req.end,
             initial_cash=req.initial_cash,
@@ -138,46 +221,77 @@ def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) ->
             return_paths=True,
         )
         out["walk_forward"] = _run_walk_forward(
-            runner, strategy.name, strategy.get_params(), strategy.version, cfg, result.start, result.end
+            provider, strategy.name, strategy.get_params(), strategy.version, cfg, result.start, result.end
         )
         return out
 
     @app.post("/api/review")
     def review(req: ReviewRequest):
+        from trading_bot.ai.llm import llm_from_config
         from trading_bot.ai.review import AITradeReviewer
 
         trades = store.trades.list(strategy=req.strategy, limit=5000)
-        rev = AITradeReviewer().review(
+        active = store.models.active()
+        llm = llm_from_config(active) if active is not None else None
+        rev = AITradeReviewer(llm=llm).review(
             trades, strategy=req.strategy, strategy_version=req.strategy_version,
             window_start=req.window_start, window_end=req.window_end,
         )
+        if llm is not None:
+            rev.summary = f"[LLM:{active.label or active.provider}] {rev.summary}"
         store.reviews.insert(rev)
         return rev.__dict__
 
     return app
 
 
-def _run_walk_forward(runner, strategy_name, params, version, base_cfg, res_start, res_end):
+def _run_walk_forward(provider, strategy_name, params, version, base_cfg, res_start, res_end):
     """Run walk-forward analysis and shape it for the dashboard.
 
-    Falls back to None when the data range cannot support multiple windows or
-    the run fails (fail-closed: the caller simply omits the field).
+    For large ranges the walk-forward is executed on the coarsest timeframe
+    that keeps the bar count bounded (4 rolling windows), so a 5-year run does
+    not take minutes. Falls back to None when the data range cannot support
+    multiple windows or the run fails (fail-closed: caller omits the field).
     """
     from datetime import datetime, timezone
 
-    from trading_bot.backtest.runner import BacktestConfig
+    from trading_bot.backtest.runner import BacktestConfig, BacktestRunner
+    from trading_bot.core.enums import Timeframe
+    from trading_bot.data.base import MarketDataQuery
     from trading_bot.validation.pipeline import run_walk_forward
 
     start = base_cfg.start if base_cfg.start > 0 else res_start
     end = base_cfg.end if base_cfg.end > 0 else res_end
     if start <= 0 or end <= 0 or end - start < 2 * 86400:
         return None
+
+    # Choose a timeframe for the walk-forward. If the requested timeframe would
+    # produce too many bars, coarsen so the analysis stays interactive.
+    max_bars = 18_000
+    chain = [Timeframe.M5, Timeframe.M15, Timeframe.M30, Timeframe.H1, Timeframe.H4, Timeframe.D1]
+    try:
+        start_idx = chain.index(base_cfg.timeframe)
+    except ValueError:
+        start_idx = 0
+    wf_tf = base_cfg.timeframe
+    wf_provider = provider
+    for tf in chain[start_idx:]:
+        current = provider if tf == base_cfg.timeframe else provider.resample(tf)
+        bars = current.load_candles(
+            MarketDataQuery(symbol=base_cfg.symbol, timeframe=tf, start=start, end=end)
+        )
+        if len(bars) <= max_bars:
+            wf_tf = tf
+            wf_provider = current
+            break
+
     base = BacktestConfig(
-        symbol=base_cfg.symbol, timeframe=base_cfg.timeframe, start=start, end=end,
+        symbol=base_cfg.symbol, timeframe=wf_tf, start=start, end=end,
         initial_cash=base_cfg.initial_cash, seed=base_cfg.seed,
     )
+    wf_runner = BacktestRunner(wf_provider)
     try:
-        wf = run_walk_forward(runner, strategy_name, dict(params), version, base, n_windows=4)
+        wf = run_walk_forward(wf_runner, strategy_name, dict(params), version, base, n_windows=4)
     except Exception:
         return None
     if not wf.windows:
@@ -197,6 +311,7 @@ def _run_walk_forward(runner, strategy_name, params, version, base_cfg, res_star
         "generalization_score": generalization,
         "consistency_pct": round(consistency, 1),
         "consistent": wf.consistent(),
+        "timeframe": wf_tf.value,
         "segments": [
             {
                 "segment": f"Segment {i + 1}",

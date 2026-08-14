@@ -48,7 +48,7 @@ def build_provider(symbol: str = DEFAULT_SYMBOL, timeframe: str = "5m", mode: st
     return SyntheticDataProvider(
         symbol=symbol,
         seed=7,
-        start=now - 120 * 86400,
+        start=now - 5 * 365 * 86400,
         end=now,
         tf=Timeframe(timeframe),
         initial_price=2050.0 if symbol == DEFAULT_SYMBOL else 1.1000,

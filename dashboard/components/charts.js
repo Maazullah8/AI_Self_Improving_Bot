@@ -10,6 +10,11 @@ import {
   Legend,
   Line,
   LineChart,
+  PolarAngleAxis,
+  PolarGrid,
+  PolarRadiusAxis,
+  Radar,
+  RadarChart,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -98,7 +103,39 @@ export function DrawdownChart({ data, height = 120 }) {
   );
 }
 
-export function BarChartSimple({ data, height = 220, dataKey = "value", colorMode = "sign" }) {
+export function BarChartSimple({ data, height = 220, dataKey = "value", colorMode = "sign", layout = "vertical" }) {
+  if (layout === "horizontal") {
+    return (
+      <ResponsiveContainer width="100%" height={height}>
+        <BarChart data={data} layout="vertical" margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" horizontal={false} />
+          <XAxis type="number" tick={axisStyle} tickLine={false} axisLine={false} />
+          <YAxis
+            type="category"
+            dataKey="label"
+            tick={axisStyle}
+            tickLine={false}
+            axisLine={false}
+            width={52}
+          />
+          <Tooltip
+            contentStyle={tooltipStyle}
+            labelStyle={{ color: "var(--color-muted-foreground)" }}
+            cursor={{ fill: "rgba(255,255,255,0.04)" }}
+          />
+          <Bar dataKey={dataKey} radius={[0, 4, 4, 0]} maxBarSize={14}>
+            {data.map((d, i) => (
+              <Cell
+                key={i}
+                fill={colorMode === "sign" ? (d[dataKey] >= 0 ? "var(--color-profit)" : "var(--color-loss)") : "var(--color-ai)"}
+                fillOpacity={0.85}
+              />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    );
+  }
   return (
     <ResponsiveContainer width="100%" height={height}>
       <BarChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -121,6 +158,27 @@ export function BarChartSimple({ data, height = 220, dataKey = "value", colorMod
         </Bar>
         {colorMode === "sign" && <ReferenceLine y={0} stroke="rgba(255,255,255,0.15)" />}
       </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+export function ScoreRadarChart({ data, height = 220 }) {
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <RadarChart data={data} outerRadius="72%">
+        <PolarGrid stroke="rgba(255,255,255,0.1)" />
+        <PolarAngleAxis dataKey="metric" tick={{ fill: "var(--color-muted-foreground)", fontSize: 10 }} />
+        <PolarRadiusAxis domain={[0, 100]} tick={false} axisLine={false} />
+        <Radar
+          dataKey="value"
+          name="Score"
+          stroke="var(--color-ai)"
+          strokeWidth={1.5}
+          fill="var(--color-ai)"
+          fillOpacity={0.15}
+        />
+        <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: "var(--color-muted-foreground)" }} />
+      </RadarChart>
     </ResponsiveContainer>
   );
 }

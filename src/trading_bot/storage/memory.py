@@ -10,6 +10,7 @@ from typing import Optional
 from trading_bot.core.models import TradeRecord
 from trading_bot.storage.interfaces import (
     HeartbeatRecord,
+    ModelConfigRecord,
     ReviewRecord,
     SignalRecord,
     StrategyVersionRecord,
@@ -125,6 +126,65 @@ class MemoryReviewStore:
         return rows[-limit:]
 
 
+class MemoryModelConfigStore:
+    def __init__(self):
+        self._rows: list[ModelConfigRecord] = []
+        self._next = 1
+
+    def _id(self) -> str:
+        mid = f"model_{self._next}"
+        self._next += 1
+        return mid
+
+    def upsert(self, rec: ModelConfigRecord) -> ModelConfigRecord:
+        if not rec.id:
+            rec.id = self._id()
+        existing = self.get(rec.id)
+        now = utcnow_iso()
+        if existing:
+            rec.created_at = existing.created_at
+        else:
+            rec.created_at = rec.created_at or now
+        rec.updated_at = now
+        if rec.is_active:
+            for r in self._rows:
+                r.is_active = False
+        if existing:
+            self._rows = [r if r.id != rec.id else rec for r in self._rows]
+        else:
+            self._rows.append(rec)
+        return rec
+
+    def get(self, model_id: str) -> Optional[ModelConfigRecord]:
+        for r in self._rows:
+            if r.id == model_id:
+                return r
+        return None
+
+    def list(self) -> list[ModelConfigRecord]:
+        return sorted(self._rows, key=lambda r: (not r.is_active, r.created_at))
+
+    def delete(self, model_id: str) -> bool:
+        before = len(self._rows)
+        self._rows = [r for r in self._rows if r.id != model_id]
+        return len(self._rows) < before
+
+    def set_active(self, model_id: str) -> Optional[ModelConfigRecord]:
+        rec = self.get(model_id)
+        if rec is None:
+            return None
+        for r in self._rows:
+            r.is_active = r.id == model_id
+        rec.updated_at = utcnow_iso()
+        return rec
+
+    def active(self) -> Optional[ModelConfigRecord]:
+        for r in self._rows:
+            if r.is_active:
+                return r
+        return None
+
+
 class MemoryStore:
     def __init__(self):
         self.strategies = MemoryStrategyVersionStore()
@@ -132,3 +192,4 @@ class MemoryStore:
         self.signals = MemorySignalStore()
         self.heartbeats = MemoryHeartbeatStore()
         self.reviews = MemoryReviewStore()
+        self.models = MemoryModelConfigStore()

@@ -87,6 +87,49 @@ class ReviewRecord:
     created_at: str = ""
 
 
+@dataclass
+class ModelConfigRecord:
+    """An AI model connection: local (Ollama) or online via API key.
+
+    ``api_key`` is stored server-side and never returned by the API (only a
+    masked display form is exposed).
+    """
+
+    id: str = ""
+    provider: str = "openai"  # ollama | openai | openrouter | groq | anthropic | gemini | custom
+    label: str = ""
+    base_url: str = ""  # e.g. http://localhost:11434 for Ollama
+    api_key: str = ""  # blank for local Ollama
+    model: str = ""  # e.g. llama3.1:8b, gpt-4o
+    is_active: bool = False
+    created_at: str = ""
+    updated_at: str = ""
+
+    def masked_key(self) -> str:
+        if not self.api_key:
+            return ""
+        if len(self.api_key) <= 8:
+            return "••••"
+        return f"{self.api_key[:6]}••••••••{self.api_key[-4:]}"
+
+    def to_dict(self, include_key: bool = False) -> dict:
+        d = {
+            "id": self.id,
+            "provider": self.provider,
+            "label": self.label,
+            "base_url": self.base_url,
+            "model": self.model,
+            "is_active": self.is_active,
+            "masked_key": self.masked_key(),
+            "has_key": bool(self.api_key),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        if include_key:
+            d["api_key"] = self.api_key
+        return d
+
+
 class StrategyVersionStore(Protocol):
     def create(self, rec: StrategyVersionRecord) -> StrategyVersionRecord: ...
     def get(self, name: str, version: str) -> Optional[StrategyVersionRecord]: ...
@@ -117,6 +160,15 @@ class ReviewStore(Protocol):
     def list(self, strategy: Optional[str] = None, limit: int = 100) -> list[ReviewRecord]: ...
 
 
+class ModelConfigStore(Protocol):
+    def upsert(self, rec: ModelConfigRecord) -> ModelConfigRecord: ...
+    def get(self, model_id: str) -> Optional[ModelConfigRecord]: ...
+    def list(self) -> list[ModelConfigRecord]: ...
+    def delete(self, model_id: str) -> bool: ...
+    def set_active(self, model_id: str) -> Optional[ModelConfigRecord]: ...
+    def active(self) -> Optional[ModelConfigRecord]: ...
+
+
 class Store(Protocol):
     """Aggregate store facade used by the application."""
 
@@ -125,3 +177,4 @@ class Store(Protocol):
     signals: SignalStore
     heartbeats: HeartbeatStore
     reviews: ReviewStore
+    models: ModelConfigStore

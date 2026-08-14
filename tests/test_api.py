@@ -141,5 +141,64 @@ class TestApi:
             "strategy": "smc_crt", "strategy_version": "v1.0",
         })
         assert r.status_code == 200
+        assert "hypothesis" in r.json()
+        assert "rule_compliance" in r.json()
+
+    def test_data_range(self, client):
+        r = client.get("/api/data-range?symbol=EURUSD&timeframe=5m")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["n_bars"] > 0
+        assert body["start"] < body["end"]
+
+    def test_models_crud_and_masking(self, client):
+        r = client.post("/api/models", json={
+            "provider": "ollama", "label": "Local Ollama",
+            "base_url": "http://localhost:11434", "model": "llama3.1:8b",
+            "is_active": True,
+        })
+        assert r.status_code == 200
+        rec = r.json()
+        mid = rec["id"]
+        assert rec["provider"] == "ollama"
+        assert rec["is_active"] is True
+
+        r2 = client.post("/api/models", json={
+            "provider": "openai", "label": "OpenAI",
+            "api_key": "sk-proj-1234567890abcdef", "model": "gpt-4o-mini",
+        })
+        oid = r2.json()["id"]
+        assert r2.json()["masked_key"] == "sk-pro••••••••cdef"
+        assert r2.json()["has_key"] is True
+        assert "api_key" not in r2.json()
+
+        # activating one model deactivates the others
+        r3 = client.post(f"/api/models/{oid}/activate")
+        assert r3.json()["is_active"] is True
+        assert client.get("/api/models").json()[0]["is_active"] is True
+
+        # test connection probe fails gracefully when no server is running
+        r4 = client.post(f"/api/models/{mid}/test")
+        assert r4.status_code == 200
+        assert r4.json()["ok"] is False
+
+        # delete
+        r5 = client.delete(f"/api/models/{mid}")
+        assert r5.status_code == 200
+        assert client.delete(f"/api/models/{mid}").status_code == 404
+
+    def test_review_uses_configured_model(self, client):
+        client.post("/api/models", json={
+            "provider": "ollama", "label": "Ollama",
+            "base_url": "http://localhost:9", "model": "llama3.1:8b",
+            "is_active": True,
+        })
+        r = client.post("/api/review", json={
+            "strategy": "smc_crt", "strategy_version": "v1.0",
+        })
+        # deterministic fallback must still succeed (fail-closed) and note the model
+        assert r.status_code == 200
+        body = r.json()
+        assert body["hypothesis"]
         body = r.json()
         assert "hypothesis" in body

@@ -19,6 +19,51 @@ export async function getHealth() {
   }
 }
 
+export async function getDataRange(symbol = "XAUUSD", timeframe = "5m") {
+  try {
+    return await fetchJSON(`/api/data-range?symbol=${symbol}&timeframe=${timeframe}`);
+  } catch {
+    return { start: 0, end: 0, n_bars: 0 };
+  }
+}
+
+export async function getModels() {
+  try {
+    const m = await fetchJSON("/api/models");
+    return Array.isArray(m) ? m : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveModel(payload) {
+  const r = await fetch("/api/models", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function deleteModel(id) {
+  const r = await fetch(`/api/models/${id}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function activateModel(id) {
+  const r = await fetch(`/api/models/${id}/activate`, { method: "POST" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+export async function testModel(id) {
+  const r = await fetch(`/api/models/${id}/test`, { method: "POST" });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
 export async function getMetrics() {
   try {
     const m = await fetchJSON("/api/metrics");

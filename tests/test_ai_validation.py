@@ -143,6 +143,58 @@ class TestValidation:
         assert mc["equity_paths"] == []
         assert mc["median_final_equity"] == 10000.0
 
+
+class TestLLMConfig:
+    def test_chat_endpoint_building(self):
+        from trading_bot.ai.llm import _chat_endpoint
+
+        assert _chat_endpoint("http://localhost:11434") == "http://localhost:11434/v1/chat/completions"
+        assert _chat_endpoint("http://localhost:11434/v1") == "http://localhost:11434/v1/chat/completions"
+        assert _chat_endpoint("https://api.openai.com/v1") == "https://api.openai.com/v1/chat/completions"
+        assert _chat_endpoint("https://x.example/chat/completions") == "https://x.example/chat/completions"
+        assert _chat_endpoint("") == ""
+
+    def test_llm_from_config(self):
+        from trading_bot.ai.llm import llm_from_config
+        from trading_bot.storage.interfaces import ModelConfigRecord
+
+        # local ollama needs no key
+        llm = llm_from_config(ModelConfigRecord(provider="ollama", model="llama3.1:8b"))
+        assert llm is not None
+        assert llm.base_url == "http://localhost:11434"
+        assert llm.api_key == ""
+
+        # online provider without a key -> unusable (fail-closed)
+        assert llm_from_config(ModelConfigRecord(provider="openai", model="gpt-4o")) is None
+
+        # online provider with a key -> usable
+        llm2 = llm_from_config(ModelConfigRecord(provider="openai", api_key="sk-test", model="gpt-4o"))
+        assert llm2 is not None and llm2.api_key == "sk-test"
+
+    def test_model_record_masking(self):
+        from trading_bot.storage.interfaces import ModelConfigRecord
+
+        rec = ModelConfigRecord(api_key="sk-proj-1234567890abcdef")
+        assert rec.masked_key() == "sk-pro••••••••cdef"
+        assert "api_key" not in rec.to_dict()
+        assert rec.to_dict(include_key=True)["api_key"] == "sk-proj-1234567890abcdef"
+
+    def test_synthetic_resample(self):
+        from trading_bot.core.enums import Timeframe
+        from trading_bot.core.time_utils import utc_ts
+        from trading_bot.data.base import MarketDataQuery
+        from trading_bot.data.synthetic import SyntheticDataProvider
+
+        p = SyntheticDataProvider(
+            symbol="EURUSD", seed=5,
+            start=utc_ts(2023, 1, 1), end=utc_ts(2023, 2, 28, 23, 59),
+            tf=Timeframe.M5, initial_price=1.1, volatility=0.0005,
+        )
+        coarse = p.resample(Timeframe.H1)
+        assert coarse is not p
+        bars = coarse.load_candles(MarketDataQuery(symbol="EURUSD", timeframe=Timeframe.H1))
+        assert len(bars) > 0
+
     def test_monte_carlo_ruin_low_for_positive_series(self):
         rs = [0.5, 0.5, 0.6, 0.4, 0.7, 0.5]
         mc = monte_carlo(rs, n_sims=1000, seed=3)

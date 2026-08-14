@@ -23,6 +23,24 @@ function fmtDate(t) {
   return new Date(t * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+const RANGE_PRESETS = [
+  { label: "6M", days: 6 * 30 },
+  { label: "1Y", days: 365 },
+  { label: "2Y", days: 2 * 365 },
+  { label: "3Y", days: 3 * 365 },
+  { label: "5Y", days: 5 * 365 },
+];
+
+function ymd(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function ymdToEpoch(ymdStr, endOfDay = false) {
+  const [y, m, d] = ymdStr.split("-").map(Number);
+  const ts = Date.UTC(y, m - 1, d, endOfDay ? 23 : 0, endOfDay ? 59 : 0, endOfDay ? 59 : 0);
+  return Math.floor(ts / 1000);
+}
+
 const STATUS_TONE = {
   RUNNING: { variant: "ai", label: "Running" },
   QUEUED: { variant: "outline", label: "Queued" },
@@ -36,9 +54,20 @@ export default function BacktestingPage() {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [mcTab, setMcTab] = useState("paths");
+  const [timeframe, setTimeframe] = useState("5m");
+  const [rangeFrom, setRangeFrom] = useState(() => ymd(new Date(Date.now() - 6 * 30 * 86400)));
+  const [rangeTo, setRangeTo] = useState(() => ymd(new Date()));
 
   useEffect(() => {
     getDashboardData().then(setData).catch(() => setData(null));
+    fetch("/api/data-range?symbol=XAUUSD&timeframe=5m")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d || !d.start || !d.end) return;
+        setRangeFrom(ymd(new Date(d.end * 1000 - 6 * 30 * 86400)));
+        setRangeTo(ymd(new Date(d.end * 1000)));
+      })
+      .catch(() => {});
   }, []);
 
   const versions = data?.strategies || [];
@@ -51,16 +80,15 @@ export default function BacktestingPage() {
     setRunning(true);
     setError(null);
     setResult(null);
-    const now = Math.floor(Date.now() / 1000);
     try {
       const r = await fetch("/api/backtest", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           symbol: "XAUUSD",
-          timeframe: "5m",
-          start: now - 90 * 86400,
-          end: now,
+          timeframe,
+          start: ymdToEpoch(rangeFrom),
+          end: ymdToEpoch(rangeTo, true),
           initial_cash: 10000.0,
           strategy: "smc_crt",
           params: { htf: "4h", zone_tf: "4h", ltf: "5m" },
@@ -193,6 +221,79 @@ export default function BacktestingPage() {
 
         <Card title="Run Backtest" subtitle="Live backend via /api/backtest">
           <div className="flex flex-col gap-3">
+            <div className="space-y-2.5">
+              <div>
+                <div className="text-[11px] font-medium text-muted-foreground mb-1.5">Date range</div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <label className="block text-[10px] text-muted-foreground mb-0.5">From</label>
+                    <input
+                      type="date"
+                      value={rangeFrom}
+                      max={rangeTo}
+                      onChange={(e) => setRangeFrom(e.target.value)}
+                      className="w-full rounded-md bg-muted/20 border border-border px-2 py-1.5 text-xs tabular-nums"
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <label className="block text-[10px] text-muted-foreground mb-0.5">To</label>
+                    <input
+                      type="date"
+                      value={rangeTo}
+                      min={rangeFrom}
+                      max={ymd(new Date())}
+                      onChange={(e) => setRangeTo(e.target.value)}
+                      className="w-full rounded-md bg-muted/20 border border-border px-2 py-1.5 text-xs tabular-nums"
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {RANGE_PRESETS.map((p) => {
+                    const active = rangeFrom === ymd(new Date(Date.now() - p.days * 86400));
+                    return (
+                      <button
+                        key={p.label}
+                        onClick={() => {
+                          const now = new Date();
+                          setRangeTo(ymd(now));
+                          setRangeFrom(ymd(new Date(now.getTime() - p.days * 86400)));
+                        }}
+                        className={`px-2 py-1 rounded-md text-[10px] font-medium border transition-colors ${
+                          active
+                            ? "bg-ai/20 text-ai border-ai/30"
+                            : "bg-muted/20 text-muted-foreground border-border hover:text-foreground"
+                        }`}
+                      >
+                        {p.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-[10px] text-muted-foreground mt-1.5">
+                  Supports 6 months up to 5 years of data. Use a coarser timeframe for long ranges.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Timeframe</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {["1m", "5m", "15m", "30m", "1h", "4h"].map((tf) => (
+                    <button
+                      key={tf}
+                      onClick={() => setTimeframe(tf)}
+                      className={`px-2 py-1 rounded-md text-[10px] font-medium border transition-colors ${
+                        timeframe === tf
+                          ? "bg-ai/20 text-ai border-ai/30"
+                          : "bg-muted/20 text-muted-foreground border-border hover:text-foreground"
+                      }`}
+                    >
+                      {tf}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
             <button
               onClick={runBacktest}
               disabled={running}

@@ -55,6 +55,7 @@ class SyntheticDataProvider(DataProvider):
         self.volume_per_bar = volume_per_bar
         self.spread_points = spread_points
         self._bars: Optional[list[Candle]] = None
+        self._resampled: dict[Timeframe, "SyntheticDataProvider"] = {}
 
     def _generate(self) -> list[Candle]:
         rng = np.random.default_rng(self.seed)
@@ -163,6 +164,35 @@ class SyntheticDataProvider(DataProvider):
             lot_max=100.0,
             lot_step=0.01,
         )
+
+    def resample(self, timeframe: Timeframe) -> "SyntheticDataProvider":
+        """Return a provider over the same window at a new timeframe.
+
+        Instances are cached so repeated requests do not regenerate bars.
+        Requesting the provider's own timeframe returns ``self``.
+        """
+        if timeframe == self.tf:
+            return self
+        cached = self._resampled.get(timeframe)
+        if cached is not None:
+            return cached
+        provider = SyntheticDataProvider(
+            symbol=self.symbol,
+            seed=self.seed,
+            digits=self.digits,
+            start=self.start,
+            end=self.end,
+            tf=timeframe,
+            initial_price=self.initial_price,
+            volatility=self.volatility,
+            drift=self.drift,
+            trend_cycles=self.trend_cycles,
+            intraday_vol_boost=self.intraday_vol_boost,
+            volume_per_bar=self.volume_per_bar,
+            spread_points=self.spread_points,
+        )
+        self._resampled[timeframe] = provider
+        return provider
 
 
 def generate_csv(
