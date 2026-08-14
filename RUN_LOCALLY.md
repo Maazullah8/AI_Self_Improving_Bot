@@ -39,7 +39,7 @@ python3 -m venv .venv
 
 # activate it
 source .venv/bin/activate      # macOS / Linux
-# .venv\Scripts\activate       # Windows
+.venv\Scripts\activate       # Windows
 
 # install backend + API dependencies
 pip install -e ".[api,dev]"
