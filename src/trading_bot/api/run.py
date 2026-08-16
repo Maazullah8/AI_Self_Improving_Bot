@@ -68,12 +68,12 @@ def seed_demo(store: MemoryStore, provider, symbol: str, timeframe: str) -> None
     runner = BacktestRunner(provider, journal=journal)
     now = int(time.time())
     cfg = BacktestConfig(
-        symbol=symbol,
-        timeframe=Timeframe(timeframe),
-        start=now - 90 * 86400,
-        end=now - 86400,
-        initial_cash=10_000.0,
-        seed=42,
+    symbol=symbol,
+    timeframe=Timeframe(timeframe),
+    start=now - 50 * 86400,
+    end=now - 86400,
+    initial_cash=10_000.0,
+    seed=42,
     )
     result = runner.run(strategy, cfg)
     print(f"seeded {len(result.trades)} backtest trades, final equity {result.final_equity:.2f}", flush=True)
