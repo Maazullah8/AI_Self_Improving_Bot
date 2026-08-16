@@ -5,7 +5,7 @@ import { Activity, Crosshair, RefreshCw, Timer } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
 import { Badge, Card, StatCard } from "@/components/ui";
-import { getDashboardData, getLive } from "@/lib/data";
+import { getLive } from "@/lib/data";
 
 function fmtNum(v, digits = 2) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
@@ -16,16 +16,12 @@ const POLL_MS = 10000;
 
 export default function LiveTradesPage() {
   const [live, setLive] = useState(null);
-  const [demo, setDemo] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
-      const [l, d] = await Promise.all([getLive(), getDashboardData()]);
-      if (!cancelled) {
-        setLive(l);
-        setDemo(d);
-      }
+      const l = await getLive();
+      if (!cancelled) setLive(l);
     };
     load();
     const id = setInterval(load, POLL_MS);
@@ -36,7 +32,7 @@ export default function LiveTradesPage() {
   }, []);
 
   const online = live?.online;
-  const positions = online ? live.positions : demo?.livePositions || [];
+  const positions = online ? live.positions : [];
   const statusTone =
     live?.status === "down" ? "loss" : live?.status === "warn" ? "warn" : "profit";
 
@@ -78,9 +74,9 @@ export default function LiveTradesPage() {
       </Card>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Total Trades" value={fmtNum(online ? live.nTrades : demo?.cards.totalTrades ?? 2810, 0)} subvalue="All time" icon={<Activity className="size-4" />} />
-        <StatCard label="Signals" value={fmtNum(online ? live.nSignals : demo?.cards.totalTrades ?? 0, 0)} subvalue="Generated" />
-        <StatCard label="Net P&L" value={online ? `${live.realizedPnl >= 0 ? "+" : ""}$${fmtNum(live.realizedPnl, 0)}` : `$${fmtNum(demo?.cards.todayPnL ?? 0, 0)}`} subvalue={online ? "Realized" : "Today (demo)"} variant={(online ? live.realizedPnl : demo?.cards.todayPnL) >= 0 ? "profit" : "loss"} />
+        <StatCard label="Total Trades" value={online ? fmtNum(live.nTrades, 0) : "—"} subvalue="All time" icon={<Activity className="size-4" />} />
+        <StatCard label="Signals" value={online ? fmtNum(live.nSignals, 0) : "—"} subvalue="Generated" />
+        <StatCard label="Net P&L" value={online ? `${live.realizedPnl >= 0 ? "+" : ""}$${fmtNum(live.realizedPnl, 0)}` : "—"} subvalue={online ? "Realized" : "Not running"} variant={(online ? live.realizedPnl : 0) >= 0 ? "profit" : "loss"} />
         <StatCard label="Pipeline" value={online ? live.status.toUpperCase() : "OFF"} subvalue={online ? live.detail : "not running"} variant={statusTone} />
       </div>
 

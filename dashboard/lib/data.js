@@ -1,7 +1,7 @@
 // Dashboard data layer: fetches the FastAPI backend (proxied via /api) and
-// normalizes into the shapes the UI consumes. When the backend is offline or
-// empty, it falls back to deterministic demo data in the same shape so the
-// dashboard is always presentable.
+// normalizes into the shapes the UI consumes. No mock/demo data is used — every
+// value comes from the integrated backend. When the backend is offline or has
+// no data, the UI receives empty/default values and renders empty states.
 
 export const INITIAL_CASH = 10000;
 
@@ -98,7 +98,7 @@ export async function getMetrics() {
 
 export async function getTrades() {
   try {
-    const t = await fetchJSON("/api/trades?limit=2000");
+    const t = await fetchJSON("/api/trades?limit=5000");
     return Array.isArray(t) ? t : [];
   } catch {
     return [];
@@ -116,7 +116,7 @@ export async function getStrategies() {
 
 export async function getReviews() {
   try {
-    const r = await fetchJSON("/api/reviews");
+    const r = await fetchJSON("/api/reviews?limit=100");
     return Array.isArray(r) ? r : [];
   } catch {
     return [];
@@ -124,7 +124,6 @@ export async function getReviews() {
 }
 
 // Normalize the /api/live endpoint into the shape the Live Trades page uses.
-// Open positions map to the demo `livePositions` schema (pair/direction/pnl).
 export async function getLive() {
   try {
     const l = await fetchJSON("/api/live");
@@ -151,6 +150,7 @@ export async function getLive() {
       symbol: l.symbol,
       timeframe: l.timeframe,
       strategy: l.strategy,
+      strategyVersion: l.strategy_version,
       status: l.status,
       detail: l.detail,
       balance: l.balance,
@@ -189,207 +189,158 @@ export function drawdownFromEquity(points) {
   });
 }
 
-function fmtTime(t) {
+export function fmtTime(t) {
   if (!t) return "—";
   return new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ");
 }
 
-function demoEquityCurve() {
-  // Deterministic demo curve that mirrors the reference "equity curve".
-  const seed = 7;
-  let eq = INITIAL_CASH;
-  const pts = [];
-  const now = Date.now();
-  for (let i = 0; i <= 30; i++) {
-    const r = Math.sin(i * 1.7 + seed) * 0.9 + Math.sin(i * 0.6) * 0.5;
-    eq += r * 18 + 9;
-    pts.push({ t: Math.floor(now / 1000) - (30 - i) * 86400, equity: Math.round(eq) });
-  }
-  return pts;
-}
-
-export const DEMO = {
-  cards: {
-    balance: 14823.47,
-    equity: 14956.22,
-    todayPnL: 312.85,
-    todayPnLPct: 2.14,
-    winRate: 64.2,
-    maxDrawdown: -8.4,
-    sharpeRatio: 1.87,
-    profitFactor: 1.94,
-    aiConfidence: 82,
-  },
-  aiAnalysis: {
-    marketRegime: "Trending",
-    marketCondition: "Clear Uptrend",
-    setupType: "Order Block",
-    htfBias: "Bullish",
-    ltfConfirmation: "Strong",
-    confidence: 87,
-    reasoning:
-      "HTF structure is bullish with price reclaiming the 4H demand zone. LTF shows a displacement candle with volume confirmation — smart money positioning is visible on the 5m timeline.",
-  },
-  livePositions: [
-    { id: "T-001", pair: "EURUSD", direction: "LONG", entryPrice: 1.08432, currentPrice: 1.08671, sl: 1.0815, tp: 1.091, lot: 0.5, pnl: 119.5, pnlPct: 1.1, openTime: "09:14:32", duration: "2h 18m", risk: 1.5 },
-    { id: "T-002", pair: "GBPJPY", direction: "SHORT", entryPrice: 197.842, currentPrice: 197.312, sl: 198.4, tp: 196.5, lot: 0.3, pnl: 95.4, pnlPct: 0.82, openTime: "10:05:11", duration: "1h 27m", risk: 1 },
-    { id: "T-003", pair: "XAUUSD", direction: "LONG", entryPrice: 2318.5, currentPrice: 2321.8, sl: 2308, tp: 2335, lot: 0.2, pnl: 33.0, pnlPct: 0.28, openTime: "11:32:05", duration: "0h 52m", risk: 0.8 },
-  ],
-  alerts: [
-    { id: "AL-101", level: "info", title: "Market regime shift detected", time: "2 min ago", unread: true },
-    { id: "AL-100", level: "ai", title: "New AI learning cycle complete", time: "18 min ago", unread: true },
-    { id: "AL-099", level: "success", title: "Strategy v4.2.1 performing above expectation", time: "1h ago", unread: false },
-    { id: "AL-098", level: "warning", title: "Trade T-247 stopped out. AI flagged for review.", time: "3h ago", unread: false },
-    { id: "AL-097", level: "info", title: "Strategy v4.3.0-beta completed 2000-iteration Monte Carlo.", time: "5h ago", unread: false },
-  ],
-  tradeDistribution: [
-    { label: "1", value: 12 }, { label: "2", value: -8 }, { label: "3", value: 18 },
-    { label: "4", value: -4 }, { label: "5", value: 9 }, { label: "6", value: 15 },
-    { label: "7", value: -12 }, { label: "8", value: 6 }, { label: "9", value: -2 },
-    { label: "10", value: 20 }, { label: "11", value: 3 }, { label: "12", value: -6 },
-    { label: "13", value: 11 }, { label: "14", value: 14 }, { label: "15", value: -9 },
-    { label: "16", value: 5 }, { label: "17", value: -3 }, { label: "18", value: 22 },
-  ],
-  weeklyReturns: [
-    { label: "W1", value: 2.1 }, { label: "W2", value: -0.8 }, { label: "W3", value: 1.4 },
-    { label: "W4", value: 3.2 }, { label: "W5", value: -1.1 }, { label: "W6", value: 2.6 },
-    { label: "W7", value: 0.9 }, { label: "W8", value: -2.3 }, { label: "W9", value: 1.8 },
-    { label: "W10", value: 2.9 }, { label: "W11", value: -0.4 }, { label: "W12", value: 1.2 },
-  ],
-  sessionAnalysis: [
-    { label: "Asian", winRate: 58, trades: 420, pnl: 1860 },
-    { label: "London", winRate: 66, trades: 1150, pnl: 4980 },
-    { label: "NY", winRate: 63, trades: 890, pnl: 3120 },
-    { label: "London/NY Overlap", winRate: 71, trades: 350, pnl: 1980 },
-  ],
-  patterns: [
-    { id: "PI-01", name: "London Open Reversal", confidence: 92, status: "approved", detail: "London Open patterns remain highly reliable. 148 cycles of evidence." },
-    { id: "PI-02", name: "Liquidity Sweep", confidence: 78, status: "investigating", detail: "Liquidity sweep detected in 78% of losing trades. Testing sweep+reclaim filter." },
-    { id: "PI-03", name: "RSI Double Divergence", confidence: 79, status: "investigating", detail: "RSI divergence confirms trend continuation 79% of time." },
-    { id: "PI-04", name: "NY Overlap Fakeouts", confidence: 64, status: "hypothesis", detail: "NY overlap causes more fakeouts. Considering skip rule during overlap." },
-  ],
-  pipeline: [
-    { label: "Current Strategy", status: "done", pass: true, progress: 100, time: "0:32", confidence: 100 },
-    { label: "Historical Backtest", status: "done", pass: true, progress: 100, time: "4:12", confidence: 92 },
-    { label: "Monte Carlo", status: "done", pass: true, progress: 100, time: "8:47", confidence: 89 },
-    { label: "Walk Forward Validation", status: "active", pass: null, progress: 62, time: "3:24", confidence: 85 },
-    { label: "Promotion Gate", status: "pending", pass: null, progress: 0, time: "—", confidence: null },
-  ],
-  validation: {
-    passRate: 78,
-    trainScore: 84,
-    walkForwardScore: 79,
-    monteCarloScore: 86,
-    stressTestPass: true,
-    overfitRisk: "Low",
-    mcReturn: { median: 12.4, worst: -6.8, best: 28.9, p95: 18.2, p5: -3.1 },
-  },
-  backtestQueue: [
-    { id: "BT-004", strategy: "v4.3.1-beta", status: "RUNNING", progress: 73, eta: "4m 22s" },
-    { id: "BT-005", strategy: "v4.2.2-tight-sl", status: "QUEUED", progress: 0, eta: "~12m" },
-  ],
-  learning: {
-    cycle: 148,
-    status: "Learning",
-    tradesReviewed: 248,
-    currentStrategy: "v4.2.1",
-    lastLearning: "2 min ago",
-    dataset: "EURUSD + GBPJPY (Jan–Jul 2024)",
-    speed: "47 trades/min",
-    modelVersion: "GPT-4o-trading-v3.1",
-    patternsDiscovered: 284,
-    patternConfidence: 78.4,
-    strategiesGenerated: 12,
-    accuracyTrend: [
-      { label: "C1", value: 61 }, { label: "C5", value: 64 }, { label: "C10", value: 68 },
-      { label: "C20", value: 66 }, { label: "C40", value: 72 }, { label: "C80", value: 74 },
-      { label: "C120", value: 77 }, { label: "C148", value: 79 },
-    ],
-  },
-  strategyHistory: [
-    { id: "STR-004", version: "v4.3.1-beta", name: "smc_crt", status: "validating", changes: 4, updated: "2h ago", score: 91, author: "AI Engine" },
-    { id: "STR-003", version: "v4.2.1", name: "smc_crt", status: "ACTIVE", changes: 2, updated: "3d ago", score: 87, author: "AI Engine" },
-    { id: "STR-002", version: "v4.1.0", name: "smc_crt", status: "rejected", changes: 1, updated: "1w ago", score: 74, author: "Human" },
-    { id: "STR-001", version: "v4.0.0", name: "smc_crt", status: "replaced", changes: 0, updated: "2w ago", score: 69, author: "Human" },
-  ],
-};
-
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0;
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-const PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "GBPJPY", "AUDUSD", "USDCAD"];
-const ZONES = ["Order Block", "Breaker", "Demand Zone", "Supply Zone", "Fair Value Gap"];
-const CONFS = ["Strong", "Medium", "Minimal"];
-const EXITS = ["tp", "sl", "be", "manual", "time"];
-
-export function demoTrades(count = 120) {
-  const rand = mulberry32(42);
-  const now = Date.now() / 1000;
-  const out = [];
-  for (let i = 0; i < count; i++) {
-    const side = rand() > 0.5 ? "buy" : "sell";
-    const win = rand() > 0.42;
-    const r = win ? 0.5 + rand() * 2.5 : -(0.3 + rand() * 1.4);
-    const entry = 100 + rand() * 100;
-    const exit = side === "buy" ? entry + r * 0.001 * entry : entry - r * 0.001 * entry;
-    out.push({
-      trade_id: `T-${String(count - i).padStart(3, "0")}`,
-      strategy: "smc_crt",
-      strategy_version: "v4.2.1",
-      symbol: PAIRS[Math.floor(rand() * PAIRS.length)],
-      side,
-      entry_time: now - (count - i) * 3600 * 6,
-      exit_time: now - (count - i) * 3600 * 6 + 1800 + rand() * 14400,
-      duration_seconds: 1800 + Math.floor(rand() * 14400),
-      entry_price: entry,
-      exit_price: exit,
-      size: 0.2 + rand() * 0.5,
-      sl: entry * (1 - (side === "buy" ? 0.003 + rand() * 0.004 : -(0.003 + rand() * 0.004))),
-      tp: entry * (1 + (side === "buy" ? 0.006 + rand() * 0.008 : -(0.006 + rand() * 0.008))),
-      rr: 1.5 + rand() * 1.5,
-      pnl: r * 40,
-      pnl_points: r * 60,
-      r,
-      mfe: Math.abs(r) * (0.8 + rand() * 0.4),
-      mae: -Math.abs(r) * (0.2 + rand() * 0.3),
-      exit_reason: EXITS[Math.floor(rand() * EXITS.length)],
-      zone_type: ZONES[Math.floor(rand() * ZONES.length)],
-      confluence_level: CONFS[Math.floor(rand() * CONFS.length)],
-      session: ["Asian", "London", "NY", "London/NY Overlap"][Math.floor(rand() * 4)],
-      regime: rand() > 0.5 ? "Trending" : "Ranging",
-      htf_bias: side === "buy" ? "Bullish" : "Bearish",
-      bias: side === "buy" ? "Buy" : "Sell",
-      choch_csd: rand() > 0.5 ? "CHoCH" : "CSD",
-      confirmation_type: rand() > 0.5 ? "Displacement" : "Liquidity Sweep",
-      spread_paid: 0.0001,
-      slippage_paid: 0.00005,
-      commission: 2.5,
-    });
-  }
-  return out;
-}
-
 export async function getTradeHistory() {
-  const trades = await getTrades();
-  if (trades.length) return trades;
-  return demoTrades();
+  return getTrades();
 }
 
 export async function getTradeJournal() {
   const trades = await getTrades();
-  const list = trades.length ? trades : demoTrades(28);
-  return list.slice(0, 24);
+  return trades.slice(0, 24);
 }
 
-// Aggregate everything the Dashboard page needs in one call.
+// ------------------------------------------------------------ real aggregations
+
+function relativeTime(ts) {
+  if (!ts) return "—";
+  const t = typeof ts === "number" ? ts : Date.parse(ts);
+  if (Number.isNaN(t)) return "—";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+function computeWeeklyReturns(trades) {
+  const buckets = new Map();
+  for (const t of trades) {
+    if (!t.exit_time) continue;
+    const d = new Date(t.exit_time * 1000);
+    const key = `${d.getFullYear()}-W${Math.floor(d.getDate() / 7)}`;
+    buckets.set(key, (buckets.get(key) || 0) + (t.pnl || 0));
+  }
+  return [...buckets.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .slice(-24)
+    .map(([k, v], i) => ({ label: `W${i + 1}`, value: Number((v / 100).toFixed(1)) }));
+}
+
+function computeDailyReturns(trades) {
+  const buckets = new Map();
+  for (const t of trades) {
+    if (!t.exit_time) continue;
+    const d = new Date(t.exit_time * 1000);
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    buckets.set(key, (buckets.get(key) || 0) + (t.pnl || 0));
+  }
+  return [...buckets.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .slice(-30)
+    .map(([, v], i) => ({ label: String(i + 1), value: Number((v / 100).toFixed(1)) }));
+}
+
+function computeSessionAnalysis(trades) {
+  const bySession = new Map();
+  let totalPnl = 0;
+  for (const t of trades) {
+    const s = String(t.session || "Other");
+    const b = bySession.get(s) || { n: 0, wins: 0, pnl: 0 };
+    b.n += 1;
+    b.pnl += t.pnl || 0;
+    if ((t.pnl || 0) > 0) b.wins += 1;
+    totalPnl += t.pnl || 0;
+    bySession.set(s, b);
+  }
+  return [...bySession.entries()]
+    .map(([label, b]) => ({
+      label,
+      trades: b.n,
+      winRate: Number(((b.wins / b.n) * 100).toFixed(1)),
+      pnl: b.pnl,
+      avgPnl: Number((b.pnl / b.n).toFixed(1)),
+      contribution: totalPnl ? Number(((b.pnl / totalPnl) * 100).toFixed(0)) : 0,
+    }))
+    .sort((a, b) => b.contribution - a.contribution);
+}
+
+function computePairDistribution(trades) {
+  const bySym = new Map();
+  for (const t of trades) {
+    bySym.set(t.symbol, (bySym.get(t.symbol) || 0) + 1);
+  }
+  const rows = [...bySym.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count);
+  if (rows.length <= 5) return rows;
+  return rows.slice(0, 5).concat([{ label: "Others", count: rows.slice(5).reduce((a, b) => a + b.count, 0) }]);
+}
+
+function patternToCard(p, i) {
+  return {
+    id: p.id || `pat_${i}`,
+    name: `${p.dimension || "segment"} ${p.value ?? ""}`.trim(),
+    confidence: Math.round(p.win_rate || 0),
+    status: p.direction === "outperform" ? "approved" : "investigating",
+    detail: `n=${p.n ?? 0}, avg R ${p.avg_r ?? 0} — ${p.direction ?? "neutral"} segment`,
+  };
+}
+
+// Build the AI Analysis panel from the latest real review.
+function aiAnalysisFromReview(review) {
+  if (!review) return null;
+  const llmMatch = /^\[LLM:([^\]]+)\]/.exec(review.summary || "");
+  return {
+    confidence: null,
+    model: llmMatch ? llmMatch[1] : "deterministic rules",
+    reasoning: review.hypothesis || "No hypothesis recorded.",
+    summary: review.summary || "",
+    nTrades: review.n_trades || 0,
+    compliance: review.rule_compliance || {},
+    patterns: review.patterns || [],
+    created_at: review.created_at || "",
+  };
+}
+
+// Build an alert feed from real backend signals (reviews + health).
+function buildAlerts(health, reviews) {
+  const alerts = [];
+  for (const r of reviews.slice(-8).reverse()) {
+    alerts.push({
+      id: r.id || `rev_${alerts.length}`,
+      level: "ai",
+      title: "AI review completed",
+      time: relativeTime(r.created_at),
+      unread: false,
+      detail: r.summary || "Trade batch reviewed.",
+    });
+  }
+  if (health?.status === "ok") {
+    alerts.push({
+      id: "sys-online",
+      level: "success",
+      title: "Backend online",
+      time: "now",
+      unread: false,
+      detail: "API server is healthy and reachable.",
+    });
+  } else {
+    alerts.push({
+      id: "sys-offline",
+      level: "warning",
+      title: "Backend offline",
+      time: "now",
+      unread: true,
+      detail: "The API server is unreachable — integrate and start it to see live data.",
+    });
+  }
+  return alerts;
+}
+
+// Aggregate everything the Dashboard and derived pages need in one call.
+// Only real backend data is returned; empty values when nothing exists yet.
 export async function getDashboardData() {
   const [health, metrics, trades, strategies, reviews] = await Promise.all([
     getHealth(),
@@ -400,9 +351,31 @@ export async function getDashboardData() {
   ]);
 
   const hasData = metrics.online && metrics.totalTrades > 0;
-  const equityPoints = hasData ? equityFromTrades(trades) : demoEquityCurve();
+  const equityPoints = hasData ? equityFromTrades(trades) : [];
+  const drawdownPoints = drawdownFromEquity(equityPoints);
 
-  // Map real trades to the reference live-position / distribution shapes.
+  const cards = hasData
+    ? {
+        equity: metrics.finalEquity,
+        todayPnL: metrics.netProfit,
+        todayPnLPct: metrics.totalReturnPct,
+        winRate: metrics.winRate,
+        maxDrawdown: -Math.abs(metrics.maxDrawdown),
+        sharpeRatio: metrics.sharpe,
+        profitFactor: metrics.profitFactor,
+        aiConfidence: 0,
+      }
+    : {
+        equity: 0,
+        todayPnL: 0,
+        todayPnLPct: 0,
+        winRate: 0,
+        maxDrawdown: 0,
+        sharpeRatio: 0,
+        profitFactor: 0,
+        aiConfidence: 0,
+      };
+
   const recent = [...trades].sort((a, b) => b.entry_time - a.entry_time).slice(0, 8);
   const livePositions = hasData
     ? recent.map((t) => ({
@@ -420,45 +393,32 @@ export async function getDashboardData() {
         duration: `${Math.round((t.duration_seconds || 0) / 60)}m`,
         risk: 1,
       }))
-    : DEMO.livePositions;
+    : [];
 
-  const distribution = hasData
-    ? trades.map((t, i) => ({ label: String(i + 1), value: t.r })).slice(0, 30)
-    : DEMO.tradeDistribution;
-
-  const returnPct = hasData ? metrics.totalReturnPct : 48.2;
-  const cards = hasData
-    ? {
-        equity: metrics.finalEquity,
-        todayPnL: metrics.netProfit,
-        todayPnLPct: metrics.totalReturnPct,
-        winRate: metrics.winRate,
-        maxDrawdown: -Math.abs(metrics.maxDrawdown),
-        sharpeRatio: metrics.sharpe,
-        profitFactor: metrics.profitFactor,
-        aiConfidence: 82,
-      }
-    : DEMO.cards;
+  const latestReview = reviews.length ? reviews[reviews.length - 1] : null;
 
   return {
     health,
     hasData,
     cards,
     equityPoints,
-    drawdownPoints: drawdownFromEquity(equityPoints),
-    returnPct,
-    aiAnalysis: DEMO.aiAnalysis,
+    drawdownPoints,
+    returnPct: hasData ? metrics.totalReturnPct : 0,
+    aiAnalysis: aiAnalysisFromReview(latestReview),
     livePositions,
-    alerts: DEMO.alerts,
-    tradeDistribution: distribution,
-    weeklyReturns: DEMO.weeklyReturns,
-    sessionAnalysis: DEMO.sessionAnalysis,
-    patterns: DEMO.patterns,
-    pipeline: DEMO.pipeline,
-    validation: DEMO.validation,
-    strategies: strategies.length ? strategies : DEMO.strategyHistory,
-    reviews: reviews.length ? reviews : DEMO.strategyHistory,
-    trades: trades,
+    alerts: buildAlerts(health, reviews),
+    tradeDistribution: hasData
+      ? trades.map((t, i) => ({ label: String(i + 1), value: t.r })).slice(0, 30)
+      : [],
+    weeklyReturns: hasData ? computeWeeklyReturns(trades) : [],
+    dailyReturns: hasData ? computeDailyReturns(trades) : [],
+    sessionAnalysis: hasData ? computeSessionAnalysis(trades) : [],
+    pairs: hasData ? computePairDistribution(trades) : [],
+    patterns: latestReview ? (latestReview.patterns || []).map(patternToCard) : [],
+    latestReview,
+    strategies,
+    reviews,
+    trades,
     metrics,
   };
 }

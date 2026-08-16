@@ -41,13 +41,6 @@ function ymdToEpoch(ymdStr, endOfDay = false) {
   return Math.floor(ts / 1000);
 }
 
-const STATUS_TONE = {
-  RUNNING: { variant: "ai", label: "Running" },
-  QUEUED: { variant: "outline", label: "Queued" },
-  DONE: { variant: "profit", label: "Complete" },
-  FAILED: { variant: "loss", label: "Failed" },
-};
-
 export default function BacktestingPage() {
   const [data, setData] = useState(null);
   const [running, setRunning] = useState(false);
@@ -71,10 +64,6 @@ export default function BacktestingPage() {
   }, []);
 
   const versions = data?.strategies || [];
-  const queue = data?.validation ? [
-    { id: "BT-004", strategy: "v4.3.1-beta", status: "RUNNING", progress: 73, eta: "4m 22s" },
-    { id: "BT-005", strategy: "v4.2.2-tight-sl", status: "QUEUED", progress: 0, eta: "~12m" },
-  ] : [];
 
   async function runBacktest() {
     setRunning(true);
@@ -180,43 +169,54 @@ export default function BacktestingPage() {
     ["Monte Carlo", mcPass > 0 ? (mcPass / 100).toFixed(2) : "—", "ai"],
   ];
 
-  const pipeline = [
-    { label: "Training Window", value: "Jan 2023 – Aug 2023", score: 84, tone: "profit" },
-    { label: "Validation Window", value: "Sep 2023 – Nov 2023", score: 79, tone: "profit" },
-    { label: "Final Test Window", value: "Dec 2023", score: 81, tone: "profit" },
-    { label: "Walk Forward Score", value: "0.79", score: 79, tone: "ai" },
-    { label: "Monte Carlo Pass Rate", value: "86%", score: 86, tone: "ai" },
-  ];
+  const validationSteps = result
+    ? [
+        { label: "Monte Carlo Pass Rate", value: mc ? `${fmtNum(mc.pass_rate, 1)}%` : "—", score: mc ? Math.round(mc.pass_rate) : 0, tone: mc && mc.pass_rate >= 80 ? "profit" : "ai" },
+        { label: "MC Worst Drawdown (95%)", value: mc ? `${fmtNum(mc.worst_dd_pct_95, 1)}%` : "—", score: mc ? Math.max(0, Math.round(100 - mc.worst_dd_pct_95 * 2)) : 0, tone: mc && mc.worst_dd_pct_95 < 40 ? "profit" : "loss" },
+        { label: "Risk of Ruin", value: mc ? `${fmtNum(mc.risk_of_ruin_pct, 2)}%` : "—", score: mc ? Math.round(Math.max(0, 100 - mc.risk_of_ruin_pct * 10)) : 0, tone: mc && mc.risk_of_ruin_pct < 5 ? "profit" : "loss" },
+        { label: "Walk-Forward Generalization", value: wf ? `${fmtNum(forwardTest, 1)}%` : "—", score: wf ? Math.round(forwardTest) : 0, tone: wfPositive ? "profit" : "ai" },
+        { label: "Walk-Forward Consistency", value: wf ? (wfPositive ? "Consistent" : "Inconsistent") : "—", score: wf ? (wfPositive ? 100 : 40) : 0, tone: wfPositive ? "profit" : "loss" },
+      ]
+    : [];
+
+  const approvedCount = versions.filter((v) => v.status === "ACTIVE" || v.status === "active").length;
+  const passRate = versions.length ? Math.round((approvedCount / versions.length) * 100) : null;
 
   return (
     <AppShell>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Strategies Generated" value={fmtNum(versions.length || 12, 0)} subvalue="All time" icon={<FlaskConical className="size-4" />} />
-        <StatCard label="Strategies Approved" value={fmtNum(versions.filter((v) => v.status === "ACTIVE" || v.status === "active").length || 5, 0)} subvalue="Promoted" variant="profit" />
-        <StatCard label="Pass Rate" value={`${fmtNum(data?.validation?.passRate ?? 78, 0)}%`} subvalue="Avg validation" variant="profit" />
-        <StatCard label="Backtests Run" value={fmtNum(142, 0)} subvalue="This quarter" />
+        <StatCard label="Strategies Generated" value={fmtNum(versions.length, 0)} subvalue="All time" icon={<FlaskConical className="size-4" />} />
+        <StatCard label="Strategies Approved" value={fmtNum(approvedCount, 0)} subvalue="Promoted" variant="profit" />
+        <StatCard label="Pass Rate" value={passRate != null ? `${fmtNum(passRate, 0)}%` : "—"} subvalue="Approved / generated" variant="profit" />
+        <StatCard label="Backtests Run" value="—" subvalue="From the /api/backtest endpoint" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Card title="Validation Workflow" subtitle="Validation workflow for v4.3.0-beta" className="lg:col-span-2">
-          <div className="space-y-4">
-            {pipeline.map((s) => (
-              <div key={s.label} className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-medium">{s.label}</span>
-                  <span className="text-muted-foreground text-[11px] tabular-nums">{s.value}</span>
+        <Card title="Validation Workflow" subtitle="Results from the last backtest" className="lg:col-span-2">
+          {validationSteps.length ? (
+            <div className="space-y-4">
+              {validationSteps.map((s) => (
+                <div key={s.label} className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium">{s.label}</span>
+                    <span className="text-muted-foreground text-[11px] tabular-nums">{s.value}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <ProgressBar value={s.score} tone={s.tone} />
+                    <span className="text-[10px] text-muted-foreground w-8 text-right tabular-nums">{s.score}/100</span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <ProgressBar value={s.score} tone={s.tone} />
-                  <span className="text-[10px] text-muted-foreground w-8 text-right tabular-nums">{s.score}/100</span>
-                </div>
-              </div>
-            ))}
-            <p className="text-[11px] text-muted-foreground leading-relaxed">
-              Rolling window train/test to verify strategy generalizes beyond in-sample data. The promotion gate
-              requires trade count, profit factor, expectancy, win rate, drawdown and Monte Carlo tails to all pass.
-            </p>
-          </div>
+              ))}
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                Rolling window train/test verifies the strategy generalizes beyond in-sample data. These values come
+                straight from the last run's Monte Carlo and walk-forward analysis.
+              </p>
+            </div>
+          ) : (
+            <div className="py-16 text-center text-xs text-muted-foreground">
+              Run a backtest to populate the validation workflow with real results.
+            </div>
+          )}
         </Card>
 
         <Card title="Run Backtest" subtitle="Live backend via /api/backtest">
@@ -518,27 +518,30 @@ export default function BacktestingPage() {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <Card title="Backtest Queue" subtitle="Running and queued jobs">
-          <div className="space-y-3">
-            {queue.map((j) => {
-              const tone = STATUS_TONE[j.status] ?? STATUS_TONE.QUEUED;
-              return (
-                <div key={j.id} className="flex items-center gap-3 rounded-lg bg-muted/20 border border-border/40 p-3">
-                  <span className="font-mono text-xs text-muted-foreground">{j.id}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="font-medium truncate">{j.strategy}</span>
-                      <span className="text-[10px] text-muted-foreground tabular-nums">
-                        {j.status === "RUNNING" ? `${j.progress}% · ${j.eta}` : j.eta}
-                      </span>
-                    </div>
-                    <ProgressBar value={j.progress} tone={j.status === "RUNNING" ? "ai" : "muted"} />
-                  </div>
-                  <Badge variant={tone.variant}>{tone.label}</Badge>
+        <Card title="Latest Backtest" subtitle="Results from the most recent /api/backtest run">
+          {result ? (
+            <div className="space-y-2">
+              {[
+                ["Bars analyzed", fmtNum(metrics.n_bars ?? result.n_trades, 0)],
+                ["Trades", fmtNum(metrics.n_trades, 0)],
+                ["Win rate", `${fmtNum(metrics.win_rate, 1)}%`],
+                ["Profit factor", fmtNum(metrics.profit_factor, 2)],
+                ["Net profit", `$${fmtNum(metrics.total_pnl, 2)}`],
+                ["Max drawdown", `${fmtNum(metrics.max_drawdown_pct, 2)}%`],
+                ["Sharpe (R)", fmtNum(metrics.sharpe_r, 2)],
+                ["Final equity", fmtMoney(result.final_equity)],
+              ].map(([k, v]) => (
+                <div key={k} className="flex items-center justify-between text-xs">
+                  <span className="text-muted-foreground">{k}</span>
+                  <span className="font-semibold tabular-nums">{v}</span>
                 </div>
-              );
-            })}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <div className="py-16 text-center text-xs text-muted-foreground">
+              Run a backtest to see its results here.
+            </div>
+          )}
         </Card>
 
         <Card title="Strategy Comparison" subtitle="Recent validated versions">

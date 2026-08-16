@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import {
   Activity,
   Bell,
-  BrainCircuit,
   CheckCircle2,
   ChevronRight,
   CircleDot,
@@ -13,10 +12,8 @@ import {
   FlaskConical,
   Info,
   Sparkles,
-  Target,
   TrendingUp,
   Wallet,
-  Zap,
 } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
@@ -32,6 +29,17 @@ function fmtNum(v, digits = 2) {
 function fmtDate(t) {
   if (!t) return "—";
   return new Date(t * 1000).toISOString().slice(0, 10);
+}
+
+function relativeTime(iso) {
+  if (!iso) return "";
+  const t = typeof iso === "number" ? iso : Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 function toChartPoints(points) {
@@ -122,12 +130,6 @@ function AlertRow({ a }) {
   );
 }
 
-const pipelineMeta = {
-  done: { icon: CheckCircle2, cls: "text-profit", label: "Complete" },
-  active: { icon: Zap, cls: "text-ai", label: "Running" },
-  pending: { icon: Clock, cls: "text-muted-foreground", label: "Pending" },
-};
-
 export default function Page() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
@@ -170,6 +172,7 @@ export default function Page() {
   }
 
   const { cards, equityPoints, drawdownPoints, returnPct, aiAnalysis } = data;
+  const hasData = data.hasData;
   const equityChart = toChartPoints(equityPoints);
   const ddChart = toDDChartPoints(drawdownPoints);
   const positive = returnPct >= 0;
@@ -246,24 +249,43 @@ export default function Page() {
         </Card>
 
         <Card
-          title="AI Analysis"
-          subtitle="Current market interpretation"
+          title="Latest AI Review"
+          subtitle={aiAnalysis ? `${aiAnalysis.model} · ${aiAnalysis.nTrades} trades reviewed` : "No review yet"}
           className="p-5"
-          action={<Badge variant="ai" className="text-[10px]">{aiAnalysis.confidence}% conf</Badge>}
+          action={
+            aiAnalysis ? (
+              <Badge variant="ai" className="text-[10px]">{aiAnalysis.model}</Badge>
+            ) : null
+          }
         >
-          <div className="space-y-0.5">
-            <AnalysisRow label="Market Regime" value={aiAnalysis.marketRegime} icon={<Activity className="size-4" />} />
-            <AnalysisRow label="Trend" value={aiAnalysis.marketCondition} icon={<TrendingUp className="size-4" />} />
-            <AnalysisRow label="Setup Type" value={aiAnalysis.setupType} icon={<Crosshair className="size-4" />} />
-            <AnalysisRow label="HTF Bias" value={aiAnalysis.htfBias} icon={<BrainCircuit className="size-4" />} />
-            <AnalysisRow label="LTF Confirmation" value={aiAnalysis.ltfConfirmation} icon={<Target className="size-4" />} />
-          </div>
-          <div className="rounded-lg bg-muted/15 border border-border/40 p-3">
-            <p className="text-xs text-muted-foreground leading-relaxed">{aiAnalysis.reasoning}</p>
-          </div>
-          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground pt-1">
-            <Sparkles className="size-3 text-ai" /> Last analysis 2 min ago · v4.2.1
-          </div>
+          {aiAnalysis ? (
+            <div className="space-y-4">
+              <div className="space-y-0.5">
+                <AnalysisRow label="Trades Reviewed" value={fmtNum(aiAnalysis.nTrades, 0)} icon={<Activity className="size-4" />} />
+                <AnalysisRow label="Summary" value={aiAnalysis.summary?.slice(0, 60) || "—"} icon={<TrendingUp className="size-4" />} />
+              </div>
+              <div className="rounded-lg bg-muted/15 border border-border/40 p-3">
+                <p className="text-xs text-muted-foreground leading-relaxed">{aiAnalysis.reasoning}</p>
+              </div>
+              {aiAnalysis.patterns?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {aiAnalysis.patterns.slice(0, 4).map((p, i) => (
+                    <Badge key={i} variant="outline">{p.dimension}={p.value}</Badge>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground pt-1">
+                <Sparkles className="size-3 text-ai" /> {aiAnalysis.created_at ? relativeTime(aiAnalysis.created_at) : ""}
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col items-center gap-2 py-14 text-muted-foreground">
+              <Sparkles className="size-6" />
+              <p className="text-xs text-center leading-relaxed">
+                No AI review yet. Run a backtest and post a review to populate this panel with real AI analysis.
+              </p>
+            </div>
+          )}
         </Card>
       </div>
 
@@ -275,7 +297,11 @@ export default function Page() {
           className="xl:col-span-2 p-4"
           action={
             <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              Total floating P&L <span className="text-profit font-bold">+${fmtNum(247.9, 2)}</span>
+              Total floating P&L{" "}
+              <span className={`font-bold ${data.livePositions.reduce((s, p) => s + (p.pnl || 0), 0) >= 0 ? "text-profit" : "text-loss"}`}>
+                {data.livePositions.reduce((s, p) => s + (p.pnl || 0), 0) >= 0 ? "+" : ""}$
+                {fmtNum(data.livePositions.reduce((s, p) => s + (p.pnl || 0), 0), 2)}
+              </span>
             </span>
           }
         >
@@ -283,6 +309,9 @@ export default function Page() {
             {(data.livePositions || []).map((p) => (
               <PositionRow key={p.id} p={p} />
             ))}
+            {!data.livePositions.length && (
+              <div className="py-12 text-center text-xs text-muted-foreground">No open positions</div>
+            )}
           </div>
         </Card>
 
@@ -357,52 +386,35 @@ export default function Page() {
                 </div>
               </div>
             ))}
+            {!data.patterns.length && (
+              <div className="col-span-full py-12 text-center text-xs text-muted-foreground">
+                No patterns recorded yet — patterns appear after an AI review finds significant segments.
+              </div>
+            )}
           </div>
         </Card>
 
-        <Card title="Validation Pipeline" subtitle="Current strategy v4.2.1">
+        <Card title="Performance Summary" subtitle="From the integrated trade journal">
           <div className="space-y-3">
-            {data.pipeline.map((step) => {
-              const meta = pipelineMeta[step.status] ?? pipelineMeta.pending;
-              const Icon = meta.icon;
-              return (
-                <div key={step.label} className="flex items-center gap-3">
-                  <span className={`shrink-0 [&>svg]:size-3.5 ${meta.cls}`}>
-                    <Icon />
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-medium">{step.label}</span>
-                      <span className="text-[10px] text-muted-foreground tabular-nums">
-                        {step.status === "done" ? step.time : meta.label}
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 mt-1">
-                      <ProgressBar value={step.progress} tone={step.status === "done" ? "profit" : step.status === "active" ? "ai" : "muted"} />
-                      {step.confidence != null && (
-                        <span className="text-[10px] text-muted-foreground w-9 text-right tabular-nums">
-                          {step.confidence}%
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {[
+              ["Total Trades", fmtNum(data.metrics?.totalTrades, 0)],
+              ["Win Rate", hasData ? `${fmtNum(data.metrics?.winRate, 1)}%` : "—"],
+              ["Profit Factor", hasData ? fmtNum(data.metrics?.profitFactor, 2) : "—"],
+              ["Sharpe", hasData ? fmtNum(data.metrics?.sharpe, 2) : "—"],
+              ["Max Drawdown", hasData ? `${fmtNum(data.metrics?.maxDrawdown, 1)}%` : "—"],
+              ["Net Profit", hasData ? `$${fmtNum(data.metrics?.netProfit, 2)}` : "—"],
+            ].map(([k, v]) => (
+              <div key={k} className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">{k}</span>
+                <span className="font-semibold tabular-nums">{v}</span>
+              </div>
+            ))}
           </div>
-          <div className="rounded-lg bg-ai/5 border border-ai/20 p-3 space-y-1.5">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Monte Carlo pass rate</span>
-              <span className="font-semibold text-profit tabular-nums">{data.validation.passRate}%</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Walk-forward score</span>
-              <span className="font-semibold tabular-nums">{data.validation.walkForwardScore}/100</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Overfitting risk</span>
-              <Badge variant="profit">{data.validation.overfitRisk}</Badge>
-            </div>
+          <div className="rounded-lg bg-muted/15 border border-border/40 p-3">
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              No fabricated numbers — everything on this page comes from the integrated backend (trades, metrics,
+              reviews). When the backend has no data, empty states are shown.
+            </p>
           </div>
         </Card>
       </div>

@@ -20,14 +20,14 @@ import {
 
 const NAV = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard, match: "exact" },
-  { href: "/live-trades", label: "Live Trades", icon: Activity, badge: "3" },
+  { href: "/live-trades", label: "Live Trades", icon: Activity },
   { href: "/trade-history", label: "Trade History", icon: History },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/backtesting", label: "Backtesting", icon: FlaskConical },
   { href: "/trade-journal", label: "Trade Journal", icon: BookOpen },
   { href: "/ai-learning", label: "AI Learning", icon: Sparkles, aiGlow: true },
   { href: "/strategy-versions", label: "Strategy Versions", icon: GitBranch },
-  { href: "/alerts", label: "Alerts", icon: Bell, badge: "2" },
+  { href: "/alerts", label: "Alerts", icon: Bell },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

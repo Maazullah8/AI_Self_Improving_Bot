@@ -534,19 +534,19 @@ export default function SettingsPage() {
           )}
 
           {tab === "account" && (
-            <Card title="Account" subtitle="Your profile and subscription">
+            <Card title="Account" subtitle="Local installation profile">
               <div className="flex items-center gap-3">
                 <div className="size-12 rounded-lg bg-ai/15 text-ai flex items-center justify-center">
                   <User className="size-6" />
                 </div>
                 <div>
-                  <div className="text-sm font-bold">Trader Account</div>
-                  <div className="text-[11px] text-muted-foreground">trader@aiimprovbot.com</div>
+                  <div className="text-sm font-bold">Local Installation</div>
+                  <div className="text-[11px] text-muted-foreground">Self-hosted trading bot</div>
                 </div>
-                <div className="ml-auto"><Badge variant="ai">Pro Plan</Badge></div>
+                <div className="ml-auto"><Badge variant="outline">Local</Badge></div>
               </div>
               <div className="grid grid-cols-2 gap-3 mt-4">
-                {[["Plan", "Pro"], ["Status", "Active"], ["Billing", "Monthly"], ["Next renewal", "Aug 1, 2026"]].map(([k, v]) => (
+                {[["Deployment", "Self-hosted"], ["Status", "Active"], ["Data", "Integrated provider"], ["Models", "Configured in AI Connections"]].map(([k, v]) => (
                   <div key={k} className="rounded-lg bg-muted/10 border border-border/40 p-3">
                     <div className="text-[10px] uppercase tracking-wider text-muted-foreground">{k}</div>
                     <div className="text-sm font-bold tabular-nums mt-0.5">{v}</div>

@@ -17,18 +17,6 @@ function fmtTime(t) {
   return new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ");
 }
 
-const AI_COMMENTS = [
-  "Order block reaction at HTF level. Bullish displacement preceded entry. Pattern recognition was accurate — London Open Reversal confirmed.",
-  "SL placement was too tight given the volatility regime. Sweep was deeper than expected.",
-  "Trade management was disciplined. Trailing stop worked as designed.",
-];
-
-function aiComment(t, i) {
-  if (t.exit_reason === "sl") return AI_COMMENTS[1];
-  if (t.exit_reason === "tp") return AI_COMMENTS[2];
-  return AI_COMMENTS[i % AI_COMMENTS.length];
-}
-
 export default function TradeJournalPage() {
   const [trades, setTrades] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -46,10 +34,10 @@ export default function TradeJournalPage() {
   return (
     <AppShell>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <StatCard label="Trades Reviewed" value={fmtNum(trades.length || 248, 0)} subvalue="This cycle" icon={<BookOpen className="size-4" />} />
+        <StatCard label="Trades Reviewed" value={fmtNum(trades.length, 0)} subvalue="This cycle" icon={<BookOpen className="size-4" />} />
         <StatCard label="Pass Rate" value={`${fmtNum(passRate, 1)}%`} subvalue="Rule compliance" variant="profit" />
-        <StatCard label="Trades w/ Mistakes" value={fmtNum(24, 0)} subvalue="Flagged by AI" variant="loss" />
-        <StatCard label="Recommendations" value={fmtNum(9, 0)} subvalue="Across 148 cycles" />
+        <StatCard label="Trades w/ Mistakes" value="—" subvalue="Flagged by AI" variant="loss" />
+        <StatCard label="Recommendations" value="—" subvalue="Across cycles" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
@@ -128,16 +116,20 @@ export default function TradeJournalPage() {
                     <div>
                       <div className="flex justify-between text-xs mb-1">
                         <span className="text-muted-foreground">MFE</span>
-                        <span className="text-profit font-semibold tabular-nums">+{fmtNum(Math.abs(selected.mfe ?? 1.2), 2)}R</span>
+                        {selected.mfe != null ? (
+                          <span className="text-profit font-semibold tabular-nums">+{fmtNum(Math.abs(selected.mfe), 2)}R</span>
+                        ) : <span className="text-muted-foreground tabular-nums">—</span>}
                       </div>
-                      <ProgressBar value={Math.min(Math.abs(selected.mfe ?? 1.2) * 40, 100)} tone="profit" />
+                      {selected.mfe != null && <ProgressBar value={Math.min(Math.abs(selected.mfe) * 40, 100)} tone="profit" />}
                     </div>
                     <div>
                       <div className="flex justify-between text-xs mb-1">
                         <span className="text-muted-foreground">MAE</span>
-                        <span className="text-loss font-semibold tabular-nums">-{fmtNum(Math.abs(selected.mae ?? 0.5), 2)}R</span>
+                        {selected.mae != null ? (
+                          <span className="text-loss font-semibold tabular-nums">-{fmtNum(Math.abs(selected.mae), 2)}R</span>
+                        ) : <span className="text-muted-foreground tabular-nums">—</span>}
                       </div>
-                      <ProgressBar value={Math.min(Math.abs(selected.mae ?? 0.5) * 60, 100)} tone="loss" />
+                      {selected.mae != null && <ProgressBar value={Math.min(Math.abs(selected.mae) * 60, 100)} tone="loss" />}
                     </div>
                   </div>
                 </div>
@@ -147,7 +139,11 @@ export default function TradeJournalPage() {
                 <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-ai mb-2">
                   <Sparkles className="size-3" /> AI Assessment
                 </div>
-                <p className="text-xs text-foreground/85 leading-relaxed">{aiComment(selected, 0)}</p>
+                <p className="text-xs text-foreground/85 leading-relaxed">
+                  {selected.notes
+                    ? selected.notes
+                    : "No AI assessment recorded for this trade. Run a batch review to generate rule-compliance and pattern analysis."}
+                </p>
                 <div className="flex flex-wrap gap-2 mt-3">
                   <Badge variant={selected.exit_reason === "sl" ? "loss" : "profit"}>
                     <CheckCircle2 className="size-3" /> {selected.exit_reason ? `${selected.exit_reason.toUpperCase()} exit` : "Managed"}
