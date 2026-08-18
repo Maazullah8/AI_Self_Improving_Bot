@@ -11,6 +11,8 @@ Usage:
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import argparse
 import threading
 import time
@@ -29,22 +31,42 @@ from trading_bot.execution.executor import MT5Executor, SimulatedExecutor
 from trading_bot.live.pipeline import LiveConfig, LiveTradePipeline
 from trading_bot.storage.memory import MemoryStore
 from trading_bot.strategy.base import create_strategy
+from trading_bot.data.mt5_provider import MT5DataProvider
 
 
-def build_provider(symbol: str = DEFAULT_SYMBOL, timeframe: str = "5m", mode: str = "auto"):
-    """Return a data provider.
+def build_provider(
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = "5m",
+    mode: str = "auto",
+):
+    """Return the requested market-data provider.
 
-    mode: "yfinance" uses live Yahoo data (requires `pip install -e ".[yfinance]"`),
-          "synthetic" uses the deterministic demo feed,
-          "auto" prefers yfinance and falls back to synthetic.
+    mode:
+        "mt5"       -> MetaTrader 5 live market data
+        "yfinance"  -> Yahoo Finance
+        "synthetic" -> deterministic demo feed
+        "auto"      -> prefers MT5, then yfinance, then synthetic
     """
+
+    if mode == "mt5":
+        provider = MT5DataProvider()
+
+        # Force the connection now so startup fails clearly if MT5
+        # is unavailable instead of failing later inside the live thread.
+        provider._ensure()
+
+        return provider
+
     if mode == "yfinance" or (mode == "auto" and yfinance_available()):
         return YFinanceDataProvider()
+
     if mode == "yfinance":
         raise SystemExit(
             "yfinance is not installed. Run: pip install -e \".[yfinance]\""
         )
+
     now = int(time.time())
+
     return SyntheticDataProvider(
         symbol=symbol,
         seed=7,
@@ -55,7 +77,6 @@ def build_provider(symbol: str = DEFAULT_SYMBOL, timeframe: str = "5m", mode: st
         volatility=0.0004,
         trend_cycles=8,
     )
-
 
 def seed_demo(store: MemoryStore, provider, symbol: str, timeframe: str) -> None:
     """Populate the journal with a backtest + AI review so the dashboard
@@ -73,7 +94,7 @@ def seed_demo(store: MemoryStore, provider, symbol: str, timeframe: str) -> None
     start=now - 50 * 86400,
     end=now - 86400,
     initial_cash=10_000.0,
-    seed=42,
+    seed=100,
     )
     result = runner.run(strategy, cfg)
     print(f"seeded {len(result.trades)} backtest trades, final equity {result.final_equity:.2f}", flush=True)
@@ -86,7 +107,6 @@ def seed_demo(store: MemoryStore, provider, symbol: str, timeframe: str) -> None
     store.reviews.insert(rev)
     print(f"seeded review: {rev.summary}", flush=True)
 
-
 def build_executor(
     executor: str,
     login: int = 0,
@@ -94,14 +114,14 @@ def build_executor(
     server: str = "",
     path: str = "",
 ):
-    """Executor for the live pipeline.
-
-    ``simulated`` (default) is a paper executor — it never touches a broker.
-    ``mt5`` sends real orders through a running MetaTrader 5 terminal. MT5
-    fails closed: if the terminal is missing or unhealthy, orders are rejected.
-    """
     if executor == "mt5":
-        return MT5Executor(login=login, password=password, server=server, path=path)
+        return MT5Executor(
+            login=login,
+            password=password,
+            server=server,
+            path=path,
+        )
+
     return SimulatedExecutor()
 
 
@@ -124,7 +144,13 @@ def start_live(
     orders to a running MetaTrader 5 terminal (demo account strongly advised).
     """
     strategy = create_strategy("smc_crt")
-    exec_ = build_executor(executor, mt5_login, mt5_password, mt5_server, mt5_path)
+    exec_ = build_executor(
+    executor,
+    mt5_login,
+    mt5_password,
+    mt5_server,
+    mt5_path
+)
     health = exec_.health()
     if executor == "mt5" and not health.get("ok"):
         raise SystemExit(
@@ -167,8 +193,10 @@ def main(argv=None) -> None:
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL, help="e.g. XAUUSD, XAGUSD, EURUSD, BTCUSD")
     parser.add_argument("--timeframe", default="5m", choices=["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mo"])
     parser.add_argument(
-        "--provider", choices=["auto", "yfinance", "synthetic"], default="auto",
-        help="data source: yfinance (live Yahoo), synthetic (demo), auto (default)",
+        "--provider",
+        choices=["auto","mt5", "yfinance", "synthetic"],
+        default="auto",
+        help="data source: mt5 (live MT5), yfinance (Yahoo), synthetic (demo), auto",
     )
     parser.add_argument("--seed-demo", action="store_true", help="run a backtest + AI review on startup")
     parser.add_argument(
