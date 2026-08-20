@@ -10,7 +10,7 @@ Requirements
 
 Usage
 -----
-    python -m examples.backtest_mt5 --symbol EURUSD --timeframe H1 \
+    python -m examples.backtest_mt5 --symbol XAUUSD --timeframe H1 \
         --start 2023-01-01 --end 2023-12-31 --initial-cash 10000
 
 The MT5 provider is READ-ONLY: this script only copies bars; it never places
@@ -36,8 +36,8 @@ def parse_date(s: str) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Backtest smc_crt on MT5 data")
-    ap.add_argument("--symbol", default="EURUSD")
-    ap.add_argument("--timeframe", default="H1", choices=[tf.value for tf in Timeframe])
+    ap.add_argument("--symbol", default="XAUUSD")
+    ap.add_argument("--timeframe", default="M5", choices=[tf.value for tf in Timeframe])
     ap.add_argument("--start", default="2023-01-01")
     ap.add_argument("--end", default="2023-12-31")
     ap.add_argument("--initial-cash", type=float, default=10_000.0)
@@ -65,6 +65,20 @@ def main() -> None:
 
     runner = BacktestRunner(provider)
     result = runner.run(strategy, cfg)
+
+    print("\n=== STRATEGY DIAGNOSTICS ===")
+
+    if hasattr(strategy, "diagnostics"):
+        d = strategy.diagnostics()
+
+        print(f"Total rejection records: {d['total_rejections']}")
+
+        for reason, count in sorted(
+            d["rejections"].items(),
+            key=lambda x: x[1],
+            reverse=True
+            ):
+            print(f"{reason:25} {count}")
 
     m = result.metrics
     if "error" in m:
