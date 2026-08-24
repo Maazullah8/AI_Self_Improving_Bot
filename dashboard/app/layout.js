@@ -7,7 +7,10 @@ export const metadata = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
+    {/* suppressHydrationWarning: browser extensions like Dark Reader inject
+        attributes (data-darkreader-*) into <html> before React hydrates,
+        causing harmless hydration-mismatch warnings in dev. */}
+    <html lang="en" suppressHydrationWarning>
       <body>
         {children}
       </body>

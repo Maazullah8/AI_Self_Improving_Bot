@@ -178,7 +178,12 @@ export default function SettingsPage() {
     setSavingModel(true);
     setTestResult(null);
     try {
-      const saved = await saveModel({ ...form, is_active: models.length === 0 });
+      const payload = {
+        ...(editingId ? { id: editingId } : {}),
+        ...form,
+        is_active: editingId ? (models.find((m) => m.id === editingId)?.is_active ?? false) : models.length === 0,
+      };
+      const saved = await saveModel(payload);
       const list = await getModels();
       setModels(list);
       setFormOpen(false);

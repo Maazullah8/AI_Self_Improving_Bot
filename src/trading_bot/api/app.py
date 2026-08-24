@@ -135,6 +135,7 @@ class OptimizeRunRequest(BaseModel):
 
 
 class ModelConfigRequest(BaseModel):
+    id: Optional[str] = None  # present => update existing record
     provider: str = "openai"  # ollama|openai|openrouter|groq|anthropic|gemini|custom
     label: str = ""
     base_url: str = ""
@@ -744,12 +745,16 @@ def create_app(store: Optional[MemoryStore] = None, provider=None, live=None) ->
     def models_upsert(req: ModelConfigRequest):
         from trading_bot.storage.interfaces import ModelConfigRecord
 
+        existing = store.models.get(req.id) if req.id else None
         rec = store.models.upsert(
             ModelConfigRecord(
+                id=req.id or "",
                 provider=req.provider,
                 label=req.label or req.provider,
                 base_url=req.base_url,
-                api_key=req.api_key,
+                # Keep the previously stored key when the form resubmits it blank
+                # (the raw key is never sent back to the browser).
+                api_key=req.api_key or (existing.api_key if existing else ""),
                 model=req.model,
                 is_active=req.is_active,
             )
