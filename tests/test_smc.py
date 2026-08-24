@@ -7,11 +7,12 @@ from trading_bot.core.models import Candle
 from trading_bot.core.time_utils import utc_ts
 from trading_bot.strategy.smc.bias import BiasEngine
 from trading_bot.strategy.smc.candles import (
+    detect_confirmation,
+    find_mother_break,
     is_bullish_engulfing,
     is_hammer,
-    is_mother_baby,
 )
-from trading_bot.strategy.smc.confluence import compute_confluence
+from trading_bot.strategy.smc.confluence import compute_confluence, count_stacked_levels
 from trading_bot.strategy.smc.structure import (
     StructureDetector,
     detect_bos,
@@ -19,10 +20,13 @@ from trading_bot.strategy.smc.structure import (
     find_swings,
 )
 from trading_bot.strategy.smc.zones import (
+    Zone,
+    entry_zones,
     find_fvgs,
     find_liquidity_pools,
     find_order_blocks,
     find_rejection_blocks,
+    fvg_with_neighbors,
 )
 
 
@@ -211,10 +215,25 @@ class TestZones:
         assert any(z.direction == "bullish" for z in fvgs)
 
     def test_rejection_blocks(self):
-        # long lower wick with close near top
-        bars = [_c(0, 1.10, 1.101, 1.095, 1.1005)]
+        # range of quiet bars, then a candle that SWEEPS all prior lows with a
+        # long lower wick and closes back near the top -> bullish rejection block
+        bars = []
+        for i in range(12):
+            base = 1.10 + i * 1e-5
+            bars.append(_c(i, base, base + 0.0002, base - 0.0002, base + 0.0001))
+        sweep = _c(12, 1.1001, 1.1003, 1.0950, 1.10025)
+        bars.append(sweep)
         rbs = find_rejection_blocks(bars)
         assert any(z.direction == "bullish" for z in rbs)
+
+    def test_no_rejection_block_without_sweep(self):
+        # long wick but no prior low taken out -> NOT a rejection block (Sec.6:
+        # rejection blocks form after a protected/swept low or high)
+        bars = [_c(i, 1.10 + i * 1e-5, 1.1003, 1.0998, 1.10) for i in range(12)]
+        wick_only = _c(12, 1.1010, 1.1012, 1.0999, 1.1011)
+        bars.append(wick_only)
+        rbs = find_rejection_blocks(bars)
+        assert not any(z.direction == "bullish" for z in rbs)
 
     def test_liquidity_pools(self):
         bars = []
@@ -256,10 +275,32 @@ class TestCandles:
         c = _c(0, 1.10, 1.1005, 1.095, 1.1002)  # long lower wick, small body
         assert is_hammer(c, min_wick_ratio=1.5)
 
-    def test_mother_baby(self):
-        mother = _c(1, 1.1005, 1.104, 1.100, 1.1035)  # strong bull body 1.1005-1.1035
-        baby = _c(2, 1.1024, 1.1030, 1.1022, 1.1026)  # small doji inside mother
-        assert is_mother_baby(None, mother, baby)
+    def test_mother_baby_body_close_break(self):
+        # Rulebook: confirmation counts ONLY when a candle's BODY closes
+        # beyond the mother candle's high/low
+        filler = _c(0, 1.1015, 1.1020, 1.1010, 1.1018)
+        mother = _c(1, 1.1005, 1.104, 1.100, 1.1035)  # strong bull body
+        baby = _c(2, 1.1024, 1.1030, 1.1022, 1.1026)  # inside mother range
+        brk = _c(3, 1.1028, 1.1050, 1.1027, 1.1045)   # body closes above mother high
+        bars = [filler, mother, baby, brk]
+        assert find_mother_break(bars, 3, Side.BUY) == mother
+
+    def test_mother_baby_inside_engulf_does_not_count(self):
+        # Engulfing a small 'baby' INSIDE the bigger range does NOT count
+        filler = _c(0, 1.1015, 1.1020, 1.1010, 1.1018)
+        mother = _c(1, 1.1005, 1.104, 1.100, 1.1035)
+        baby = _c(2, 1.1024, 1.1030, 1.1022, 1.1026)
+        inside = _c(3, 1.1020, 1.1032, 1.1018, 1.1031)  # engulfs baby, still inside mother
+        bars = [filler, mother, baby, inside]
+        assert find_mother_break(bars, 3, Side.BUY) is None
+
+    def test_detect_confirmation_sl_reference_is_furthest_back(self):
+        prev = _c(0, 1.10, 1.101, 1.099, 1.0998)     # bearish body
+        cur = _c(1, 1.0995, 1.103, 1.0992, 1.1025)   # bullish engulfing
+        conf = detect_confirmation([prev, cur], side=Side.BUY)
+        assert conf is not None and conf.type == "engulfing"
+        # SL anchor = furthest-back extreme of the pattern cluster (Sec.9)
+        assert conf.sl_reference == pytest.approx(min(prev.low, cur.low))
 
 
 class TestConfluence:
@@ -292,3 +333,80 @@ class TestConfluence:
         )
         assert res.score >= 3
         assert res.level == ConfluenceLevel.HIGH
+
+
+class TestConfluenceStacking:
+    def test_stack_counts_distinct_level_kinds(self):
+        # Sec.6: count DISTINCT level types stacked in the same tight cluster;
+        # opposite-direction levels are ignored
+        zones = [
+            Zone(kind="rejection_block", top=1.004, bottom=0.998, direction="bullish"),
+            Zone(kind="order_block", top=1.003, bottom=0.999, direction="bullish"),
+            Zone(kind="breaker", top=1.002, bottom=1.000, direction="bearish"),
+        ]
+        n, kinds = count_stacked_levels(zones, 1.0, Side.BUY)
+        assert n == 2
+        assert set(kinds) == {"rejection_block", "order_block"}
+
+    def test_compute_confluence_reports_stack(self):
+        from trading_bot.strategy.smc.bias import BiasResult
+
+        bias = BiasResult(side=Side.BUY, source="structure", structure="bullish", votes={"structure": 1})
+        zones = [
+            Zone(kind="rejection_block", top=1.004, bottom=0.998, direction="bullish"),
+            Zone(kind="order_block", top=1.003, bottom=0.999, direction="bullish"),
+            Zone(kind="fvg", top=1.002, bottom=0.9995, direction="bullish"),
+        ]
+        res = compute_confluence(Side.BUY, bias, zones=zones, entry_price=1.0)
+        assert res.stack_count == 3
+        assert set(res.stack_kinds) == {"fvg", "order_block", "rejection_block"}
+
+
+class TestZoneHelpers:
+    def test_fvg_requires_neighbor(self):
+        ob = Zone(kind="order_block", top=1.004, bottom=1.000, direction="bullish")
+        fvg_near = Zone(kind="fvg", top=1.010, bottom=1.005, direction="bullish")
+        fvg_lonely = Zone(kind="fvg", top=2.000, bottom=1.500, direction="bullish")
+        kept = fvg_with_neighbors([fvg_near, fvg_lonely], [ob])
+        assert fvg_near in kept
+        assert fvg_lonely not in kept
+
+    def test_entry_zones_exclude_liquidity_and_rank_priority(self):
+        liq = Zone(kind="liquidity", top=1.20, bottom=1.1998, direction="bullish")
+        breaker = Zone(kind="breaker", top=1.02, bottom=1.01, direction="bullish")
+        ob = Zone(kind="order_block", top=1.03, bottom=1.02, direction="bullish")
+        rb = Zone(kind="rejection_block", top=1.04, bottom=1.03, direction="bullish")
+        fvg = Zone(kind="fvg", top=1.05, bottom=1.04, direction="bullish")
+        out = entry_zones([liq, breaker, ob, rb, fvg])
+        assert all(z.kind != "liquidity" for z in out)
+        assert [z.kind for z in out] == ["rejection_block", "order_block", "fvg", "breaker"]
+
+
+class TestBiasCRT:
+    def test_crt_range_inside_bars_and_sweep_dol(self):
+        # live pattern: [..., accumulation inside-bars, CRT candle, running bar]
+        in1 = _c(0, 1.10, 1.104, 1.096, 1.103)
+        in2 = _c(1, 1.1005, 1.1035, 1.097, 1.1025)
+        crt = _c(2, 1.10, 1.105, 1.095, 1.104)
+        running = _c(3, 1.103, 1.104, 1.090, 1.0995)  # purges CRT low
+        res = BiasEngine().compute([in1, in2, crt, running], completed_only=True)
+        assert res.crt_high == pytest.approx(crt.high)
+        assert res.crt_low == pytest.approx(crt.low)
+        assert res.inside_bars == 2
+        assert res.swept_side == "low"
+        assert res.dol == "high"  # draw on liquidity -> opposite end
+
+    def test_completed_only_uses_prior_bar_as_crt(self):
+        crt = _c(0, 1.10, 1.105, 1.095, 1.104)
+        running = _c(1, 1.106, 1.115, 1.105, 1.114)  # in-progress bar purges high
+        res = BiasEngine().compute([crt, running], completed_only=True)
+        assert res.crt_high == pytest.approx(crt.high)
+        assert res.swept_side == "high"
+        assert res.dol == "low"
+
+    def test_no_sweep_no_dol(self):
+        crt = _c(0, 1.10, 1.105, 1.095, 1.104)
+        quiet = _c(1, 1.1002, 1.104, 1.096, 1.103)
+        res = BiasEngine().compute([crt, quiet])
+        assert res.dol is None
+        assert res.swept_side is None

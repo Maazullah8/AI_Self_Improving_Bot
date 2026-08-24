@@ -6,14 +6,15 @@ UI still works. Pass ``--live`` to start a paper (simulated) live pipeline;
 it never touches real money and stays fail-closed.
 
 Usage:
-    PYTHONPATH=/workspace/src python3 -m trading_bot.api.run
-    PYTHONPATH=/workspace/src python3 -m trading_bot.api.run --symbol XAUUSD --live
+    PYTHONPATH=/workspace/src python -m trading_bot.api.run
+    PYTHONPATH=/workspace/src python -m trading_bot.api.run --symbol XAUUSD --live
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 import argparse
+import os
 import threading
 import time
 
@@ -21,9 +22,16 @@ import uvicorn
 
 from trading_bot.api.app import make_app
 from trading_bot.core.enums import Timeframe
+from trading_bot.data.fallback_provider import FallbackDataProvider
+from trading_bot.data.jsonl_provider import JSONLDataProvider
+from trading_bot.data.supabase_provider import (
+    SupabaseDataProvider,
+    load_env_file,
+)
 from trading_bot.data import (
     DEFAULT_SYMBOL,
     YFinanceDataProvider,
+    MT5DataProvider,
     SyntheticDataProvider,
     yfinance_available,
 )
@@ -34,6 +42,85 @@ from trading_bot.strategy.base import create_strategy
 from trading_bot.data.mt5_provider import MT5DataProvider
 
 
+<<<<<<< HEAD
+
+_ENV = load_env_file()
+
+
+def _build_mt5():
+    """MT5 provider honouring .env / CLI terminal location + account."""
+    import os
+
+    return MT5DataProvider(
+        path=os.environ.get("MT5_PATH") or _ENV.get("MT5_PATH") or None,
+        login=os.environ.get("MT5_LOGIN") or _ENV.get("MT5_LOGIN"),
+        password=os.environ.get("MT5_PASSWORD") or _ENV.get("MT5_PASSWORD"),
+        server=os.environ.get("MT5_SERVER") or _ENV.get("MT5_SERVER"),
+    )
+
+
+def build_provider(
+    symbol: str = DEFAULT_SYMBOL,
+    timeframe: str = "5m",
+    mode: str = "auto",
+):
+    if mode == "mt5":
+        mt5 = _build_mt5()
+        mt5._ensure()
+
+        jsonl = JSONLDataProvider()
+
+        return FallbackDataProvider([
+            mt5,
+            jsonl,
+        ])
+
+    if mode == "jsonl":
+        # Historical candles straight from the repo's data folder.
+        return JSONLDataProvider(symbol=symbol)
+
+    if mode == "supabase":
+        sb = SupabaseDataProvider(symbol=symbol)
+        if not sb.configured:
+            raise SystemExit(
+                "Supabase is not configured. Add SUPABASE_URL and SUPABASE_KEY "
+                "to the .env file in the repository root "
+                "(see src/trading_bot/data/supabase_provider.py)."
+            )
+        return sb
+
+    if mode == "yfinance":
+        if not yfinance_available():
+            raise SystemExit(
+                "yfinance is not installed. Run: pip install -e \".[yfinance]\""
+            )
+        return YFinanceDataProvider()
+
+    if mode == "auto":
+        # Priority: MT5 (running terminal) -> local data folder ->
+        # Yahoo Finance -> Supabase -> synthetic. Each entry is skipped
+        # gracefully when unavailable; FallbackDataProvider tries them
+        # in order per request.
+        chain = []
+        try:
+            mt5 = _build_mt5()
+            mt5._ensure()
+            chain.append(mt5)
+        except Exception as exc:
+            print(f"MT5 not available ({exc}); using next provider", flush=True)
+        jl = JSONLDataProvider(symbol=symbol)
+        if jl.path.exists():
+            chain.append(jl)
+        if yfinance_available():
+            chain.append(YFinanceDataProvider())
+        sb = SupabaseDataProvider(symbol=symbol)
+        if sb.configured:
+            chain.append(sb)
+        if len(chain) == 1:
+            return chain[0]
+        if chain:
+            return FallbackDataProvider(chain)
+=======
 def build_provider(
     symbol: str = DEFAULT_SYMBOL,
     timeframe: str = "5m",
@@ -64,6 +151,7 @@ def build_provider(
         raise SystemExit(
             "yfinance is not installed. Run: pip install -e \".[yfinance]\""
         )
+>>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
 
     now = int(time.time())
 
@@ -97,7 +185,13 @@ def seed_demo(store: MemoryStore, provider, symbol: str, timeframe: str) -> None
     seed=100,
     )
     result = runner.run(strategy, cfg)
-    print(f"seeded {len(result.trades)} backtest trades, final equity {result.final_equity:.2f}", flush=True)
+    print(
+    f"backtest source={getattr(provider, 'source', 'unknown')} "
+    f"bars={result.n_bars} "
+    f"trades={len(result.trades)} "
+    f"final equity={result.final_equity:.2f}",
+    flush=True,
+    )
 
     from trading_bot.ai.review import AITradeReviewer
 
@@ -194,9 +288,15 @@ def main(argv=None) -> None:
     parser.add_argument("--timeframe", default="5m", choices=["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mo"])
     parser.add_argument(
         "--provider",
+<<<<<<< HEAD
+        choices=["auto", "jsonl", "supabase", "mt5", "yfinance", "synthetic"],
+        default="auto",
+        help="data source: auto (local data folder -> supabase -> yahoo), jsonl, supabase, mt5, yfinance, synthetic",
+=======
         choices=["auto","mt5", "yfinance", "synthetic"],
         default="auto",
         help="data source: mt5 (live MT5), yfinance (Yahoo), synthetic (demo), auto",
+>>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
     )
     parser.add_argument("--seed-demo", action="store_true", help="run a backtest + AI review on startup")
     parser.add_argument(
@@ -212,7 +312,22 @@ def main(argv=None) -> None:
     parser.add_argument("--poll-seconds", type=int, default=15)
     args = parser.parse_args(argv)
 
+    # Persistent storage: Supabase Postgres when credentials are present
+    # (.env / env), otherwise in-memory (dashboard still fully functional).
     store = MemoryStore()
+    if os.environ.get("SUPABASE_DB_HOST") and os.environ.get("SUPABASE_DB_PASSWORD"):
+        try:
+            from trading_bot.storage.postgres import PostgresStore
+
+            pg = PostgresStore.from_supabase_env()
+            pg.init_schema()
+            store = pg
+            print("persistent store: Supabase Postgres", flush=True)
+        except Exception as exc:
+            print(
+                f"Supabase store unavailable ({exc}); using in-memory store",
+                flush=True,
+            )
     provider = build_provider(symbol=args.symbol, timeframe=args.timeframe, mode=args.provider)
     print(f"provider: {type(provider).__name__} symbol={args.symbol} timeframe={args.timeframe}", flush=True)
 

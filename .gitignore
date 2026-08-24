@@ -14,3 +14,4 @@ node_modules/
 .next/
 dist/
 .DS_Store
+src/trading_bot/data/*.jsonl

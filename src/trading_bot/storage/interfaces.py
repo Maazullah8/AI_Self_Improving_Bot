@@ -88,6 +88,46 @@ class ReviewRecord:
 
 
 @dataclass
+class ExperimentRecord:
+    """A permanent record of one proposed strategy change (Section 3).
+
+    Every AI-proposed modification becomes an experiment: hypothesis,
+    exact change, expected vs actual effect, all validation results
+    and the final decision. Append-only history; never deleted.
+    """
+
+    id: str = ""  # e.g. "EXP-147"
+    strategy: str = ""
+    parent_version: str = ""
+    candidate_version: str = ""  # filled once a candidate exists
+    hypothesis: str = ""
+    reason: str = ""  # observed weakness that triggered the experiment
+    change_description: str = ""  # exact rule/parameter changed
+    expected_effect: str = ""
+    actual_effect: str = ""  # measured after validation
+    backtest_results: dict = field(default_factory=dict)
+    walk_forward_results: dict = field(default_factory=dict)
+    monte_carlo_results: dict = field(default_factory=dict)
+    comparison_results: dict = field(default_factory=dict)
+    # dataset bounds are tracked to flag repeated optimisation on the
+    # same period (overfitting guard, Section 16)
+    dataset_start: int = 0
+    dataset_end: int = 0
+    decision: str = "running"  # running | promoted | rejected | rolled_back
+    decision_reason: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict:
+        d = dict(self.__dict__)
+        d["backtest_results"] = dict(self.backtest_results)
+        d["walk_forward_results"] = dict(self.walk_forward_results)
+        d["monte_carlo_results"] = dict(self.monte_carlo_results)
+        d["comparison_results"] = dict(self.comparison_results)
+        return d
+
+
+@dataclass
 class ModelConfigRecord:
     """An AI model connection: local (Ollama) or online via API key.
 
@@ -169,10 +209,26 @@ class ModelConfigStore(Protocol):
     def active(self) -> Optional[ModelConfigRecord]: ...
 
 
+class ExperimentStore(Protocol):
+    def create(self, rec: ExperimentRecord) -> ExperimentRecord: ...
+    def get(self, experiment_id: str) -> Optional[ExperimentRecord]: ...
+    def list(
+        self,
+        strategy: Optional[str] = None,
+        limit: int = 500,
+    ) -> list[ExperimentRecord]: ...
+    def update(
+        self,
+        experiment_id: str,
+        **fields,
+    ) -> Optional[ExperimentRecord]: ...
+
+
 class Store(Protocol):
     """Aggregate store facade used by the application."""
 
     strategies: StrategyVersionStore
+    experiments: ExperimentStore
     trades: TradeStore
     signals: SignalStore
     heartbeats: HeartbeatStore

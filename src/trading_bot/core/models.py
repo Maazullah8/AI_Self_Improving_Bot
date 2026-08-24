@@ -117,8 +117,8 @@ class Position:
     strategy: str = ""
     strategy_version: str = ""
     order_id: str = ""
+    broker_position_id: int = 0
     broker_comment: str = ""
-
 
 @dataclass
 class PriceLevel:
@@ -186,6 +186,13 @@ class TradeRecord:
     confluence_level: str = ""
     confluence_score: int = 0
     confluence_factors: list[str] = field(default_factory=list)
+    # --- Confluence Framework state (Section 6/7 of the rulebook)
+    draw_on_liquidity: str = ""  # 'high' | 'low' | ''
+    crt_high: float = 0.0
+    crt_low: float = 0.0
+    inside_bars: int = 0
+    confluence_stack_count: int = 0  # distinct stacked level types
+    confluence_stack_kinds: list[str] = field(default_factory=list)
     htf_timeframe: str = ""
     ltf_timeframe: str = ""
     refinement_chain: str = ""

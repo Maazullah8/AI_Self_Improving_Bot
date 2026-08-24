@@ -47,10 +47,13 @@ def compute_metrics(equity_curve, trades) -> dict:
     gross_profit = sum(p for p in pnl_series if p > 0)
     gross_loss = abs(sum(p for p in pnl_series if p < 0))
 
-    dd, dd_pct = _max_drawdown([e for _, e in eq])
+    dd, dd_pct, peak_equity = _max_drawdown(
+    [e for _, e in eq]
+    )
 
     m = {
         "initial_equity": initial,
+        "peak_equity": peak_equity,
         "final_equity": final,
         "total_return": final - initial,
         "total_return_pct": (final / initial - 1) * 100 if initial else 0.0,
@@ -87,21 +90,31 @@ def compute_metrics(equity_curve, trades) -> dict:
     return m
 
 
-def _max_drawdown(equities: list[float]) -> tuple[float, float]:
+def _max_drawdown(
+    equities: list[float],
+) -> tuple[float, float, float]:
     peak = -float("inf")
+    max_peak = 0.0
     max_dd = 0.0
     max_dd_pct = 0.0
-    for e in equities:
-        if e > peak:
-            peak = e
-        dd = peak - e
+
+    for equity in equities:
+        if equity > peak:
+            peak = equity
+
+        dd = peak - equity
+
         if dd > max_dd:
             max_dd = dd
+            max_peak = peak
+
         if peak > 0:
-            dd_pct = (peak - e) / peak * 100
+            dd_pct = (peak - equity) / peak * 100
+
             if dd_pct > max_dd_pct:
                 max_dd_pct = dd_pct
-    return max_dd, max_dd_pct
+
+    return max_dd, max_dd_pct, max_peak
 
 
 def _max_streak(r_series: list[float], kind: str) -> int:

@@ -9,6 +9,7 @@ from typing import Optional
 
 from trading_bot.core.models import TradeRecord
 from trading_bot.storage.interfaces import (
+    ExperimentRecord,
     HeartbeatRecord,
     ModelConfigRecord,
     ReviewRecord,
@@ -53,7 +54,12 @@ class MemoryStrategyVersionStore:
         rows = [r for r in self._rows if r.name == name]
         if not rows:
             return None
-        return max(rows, key=lambda r: r.created_at)
+        # stable max: ties on created_at resolve to the LATEST insertion
+        best_i, best = 0, rows[0]
+        for i, r in enumerate(rows[1:], start=1):
+            if r.created_at >= best.created_at:
+                best_i, best = i, r
+        return best
 
 
 class MemoryTradeStore:
@@ -185,6 +191,49 @@ class MemoryModelConfigStore:
         return None
 
 
+class MemoryExperimentStore:
+    """Append-only experiment history keyed by experiment id."""
+
+    def __init__(self):
+        self._rows: list[ExperimentRecord] = []
+
+    def create(self, rec: ExperimentRecord) -> ExperimentRecord:
+        if not rec.created_at:
+            rec.created_at = utcnow_iso()
+        rec.updated_at = utcnow_iso()
+        if any(r.id == rec.id for r in self._rows):
+            raise ValueError(f"experiment {rec.id} already exists")
+        self._rows.append(rec)
+        return rec
+
+    def get(self, experiment_id: str) -> Optional[ExperimentRecord]:
+        for r in self._rows:
+            if r.id == experiment_id:
+                return r
+        return None
+
+    def list(
+        self,
+        strategy: Optional[str] = None,
+        limit: int = 500,
+    ) -> list[ExperimentRecord]:
+        rows = [
+            r for r in self._rows if strategy is None or r.strategy == strategy
+        ]
+        rows.sort(key=lambda r: r.created_at)
+        return rows[-limit:]
+
+    def update(self, experiment_id: str, **fields) -> Optional[ExperimentRecord]:
+        rec = self.get(experiment_id)
+        if rec is None:
+            return None
+        for k, v in fields.items():
+            if hasattr(rec, k):
+                setattr(rec, k, v)
+        rec.updated_at = utcnow_iso()
+        return rec
+
+
 class MemoryStore:
     def __init__(self):
         self.strategies = MemoryStrategyVersionStore()
@@ -192,4 +241,5 @@ class MemoryStore:
         self.signals = MemorySignalStore()
         self.heartbeats = MemoryHeartbeatStore()
         self.reviews = MemoryReviewStore()
+        self.experiments = MemoryExperimentStore()
         self.models = MemoryModelConfigStore()

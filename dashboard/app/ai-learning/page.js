@@ -1,6 +1,12 @@
 "use client";
 
+<<<<<<< HEAD
+import { useEffect, useState } from "react";
+import { FlaskConical, XCircle, CheckCircle2, Loader2 } from "lucide-react";
+
+=======
 import { useEffect, useMemo, useState } from "react";
+>>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
 import { BookOpen, BrainCircuit, Database, Sparkles, Zap } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
@@ -23,6 +29,68 @@ function Empty({ text }) {
 }
 
 export default function AILearningPage() {
+<<<<<<< HEAD
+  const [show, setShow] = useState(false);
+  const [experiments, setExperiments] = useState(null);
+  useEffect(() => setShow(true), []);
+  useEffect(() => {
+    fetch("/api/experiments?limit=50")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows) => setExperiments(Array.isArray(rows) ? rows : []))
+      .catch(() => setExperiments([]));
+  }, []);
+
+  const [optRunning, setOptRunning] = useState(false);
+  const [optMsg, setOptMsg] = useState(null);
+
+  async function refreshExperiments() {
+    try {
+      const r = await fetch("/api/experiments?limit=50");
+      const rows = r.ok ? await r.json() : [];
+      setExperiments(Array.isArray(rows) ? rows : []);
+    } catch {
+      setExperiments([]);
+    }
+  }
+
+  async function runAiCycle() {
+    setOptRunning(true);
+    setOptMsg(null);
+    try {
+      const end = Math.floor(Date.now() / 1000);
+      const start = end - 365 * 86400;
+      const r = await fetch("/api/optimize/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          strategy: "smc_crt",
+          symbol: "XAUUSD",
+          timeframe: "5m",
+          dataset_start: start,
+          dataset_end: end,
+          auto_backtest: true,
+        }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const body = await r.json();
+      if (body.status === "proposed") {
+        setOptMsg(
+          `Proposed ${body.candidate_version} from ${body.parent_version} — experiment ${body.experiment_id} opened${body.backtest_ran ? " with head-to-head backtest" : ""}.`
+        );
+      } else if (body.detail) {
+        setOptMsg(`${body.status}: ${body.detail}`);
+      } else {
+        setOptMsg(body.status);
+      }
+      await refreshExperiments();
+    } catch (e) {
+      setOptMsg(`Failed: ${e} (is the API server running?)`);
+    } finally {
+      setOptRunning(false);
+    }
+  }
+  const l = DEMO.learning;
+=======
   const [data, setData] = useState(null);
   const [models, setModels] = useState([]);
 
@@ -53,6 +121,7 @@ export default function AILearningPage() {
     { label: "AI Model", value: modelLabel, sub: "Configured in Settings" },
     { label: "Current Strategy", value: currentStrategy, sub: "Latest version" },
   ];
+>>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
 
   return (
     <AppShell>
@@ -124,6 +193,91 @@ export default function AILearningPage() {
           <Empty text="No patterns recorded yet. Patterns are added when an AI review finds statistically significant segments." />
         )}
       </Card>
+    <Card
+      title="Experiments"
+      subtitle="Every proposed strategy change is tested before promotion — never applied directly"
+    >
+      <div className="space-y-2">
+        <div className="flex items-center gap-2 pb-1">
+          <button
+            onClick={runAiCycle}
+            disabled={optRunning}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-ai text-white text-xs font-medium hover:bg-ai/90 disabled:opacity-50 transition-colors"
+          >
+            {optRunning ? <Loader2 className="size-4 animate-spin" /> : <FlaskConical className="size-4" />}
+            {optRunning ? "Analyzing trades…" : "Run AI learning cycle"}
+          </button>
+          {optMsg && (
+            <span className="text-[10px] text-muted-foreground truncate">{optMsg}</span>
+          )}
+        </div>
+        {(experiments || []).map((e) => {
+          const tone =
+            e.decision === "promoted"
+              ? { Icon: CheckCircle2, cls: "text-profit" }
+              : e.decision === "rejected" || e.decision === "rolled_back"
+              ? { Icon: XCircle, cls: "text-loss" }
+              : { Icon: Loader2, cls: "text-ai animate-spin" };
+          return (
+            <div key={e.id} className="rounded-lg bg-muted/20 border border-border/40 p-3 space-y-1">
+              {e.overfit_warning && (
+                <div className="rounded bg-warning/10 border border-warning/40 px-2 py-1 text-[10px] text-warning">
+                  ⚠ {e.overfit_warning}
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span className="font-mono font-semibold">{e.id}</span>
+                <span className="text-muted-foreground tabular-nums">
+                  {e.parent_version}{e.candidate_version ? ` → ${e.candidate_version}` : ""}
+                </span>
+                <span className={`flex items-center gap-1 uppercase tracking-wider text-[10px] ${tone.cls}`}>
+                  <tone.Icon className="size-3.5" /> {e.decision}
+                </span>
+              </div>
+              <div className="text-[11px] leading-relaxed">
+                <span className="font-medium">Hypothesis:</span> {e.hypothesis}
+              </div>
+              {e.change_description && (
+                <div className="text-[10px] text-muted-foreground">
+                  <span className="font-medium">Change:</span> {e.change_description}
+                </div>
+              )}
+              {e.decision_reason && (
+                <div className="text-[10px] text-muted-foreground">
+                  <span className="font-medium">Decision reason:</span> {e.decision_reason}
+                </div>
+              )}
+              {e.comparison_results?.headline && (
+                <div className="mt-1 rounded bg-muted/30 border border-border/30 p-2 grid grid-cols-3 gap-x-2 gap-y-0.5 text-[10px] tabular-nums">
+                  {["total_return_pct", "win_rate", "profit_factor", "max_drawdown_pct", "expectancy_r", "sharpe_r"].map((k) => {
+                    const h = e.comparison_results.headline[k];
+                    if (!h) return null;
+                    return (
+                      <div key={k} className="flex flex-col truncate" title={`baseline ${h.baseline} vs candidate ${h.candidate}`}>
+                        <span className="text-muted-foreground truncate">{k.replace(/_/g, " ")}</span>
+                        <span className={h.improved === true ? "text-profit font-semibold" : h.improved === false ? "text-loss font-semibold" : ""}>
+                          {h.delta > 0 ? "+" : ""}{h.delta}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {experiments && experiments.length === 0 && (
+          <div className="py-8 text-center text-xs text-muted-foreground flex flex-col items-center gap-2">
+            <FlaskConical className="size-5 opacity-50" />
+            No experiments yet. Start the API server and let the reviewer propose one.
+          </div>
+        )}
+        {!experiments && (
+          <div className="py-8 text-center text-xs text-muted-foreground">Loading…</div>
+        )}
+      </div>
+    </Card>
+
     </AppShell>
   );
 }

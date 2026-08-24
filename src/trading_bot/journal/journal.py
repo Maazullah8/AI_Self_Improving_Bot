@@ -19,6 +19,18 @@ class TradeJournal(Protocol):
     def records(self) -> list[TradeRecord]: ...
 
 
+_CONSUMED_SETUP_KEYS = {
+    "bias", "htf_bias", "crt", "liquidity_target", "zone_type",
+    "zone_top", "zone_bottom", "confluence_level", "confluence_score",
+    "confluence_factors", "htf_timeframe", "ltf_timeframe",
+    "refinement_chain", "choch_csd", "confirmation_type", "attempt",
+    "session", "regime", "volatility", "spread_at_entry",
+    "volume_profile", "day_of_week", "hour_of_day", "alignment",
+    "entry_tf_close_bias", "notes", "raw", "dol", "crt_high",
+    "crt_low", "inside_bars", "stack_count", "stack_kinds",
+}
+
+
 class Journal:
     """In-memory + optionally persisted journal of completed trades."""
 
@@ -71,6 +83,12 @@ class Journal:
             confluence_level=setup.get("confluence_level", ""),
             confluence_score=int(setup.get("confluence_score", 0) or 0),
             confluence_factors=list(setup.get("confluence_factors", []) or []),
+            draw_on_liquidity=str(setup.get("dol") or ""),
+            crt_high=float(setup.get("crt_high", 0.0) or 0.0),
+            crt_low=float(setup.get("crt_low", 0.0) or 0.0),
+            inside_bars=int(setup.get("inside_bars", 0) or 0),
+            confluence_stack_count=int(setup.get("stack_count", 0) or 0),
+            confluence_stack_kinds=list(setup.get("stack_kinds", []) or []),
             htf_timeframe=setup.get("htf_timeframe", ""),
             ltf_timeframe=setup.get("ltf_timeframe", ""),
             refinement_chain=setup.get("refinement_chain", ""),
@@ -87,7 +105,17 @@ class Journal:
             alignment=setup.get("alignment", ""),
             entry_tf_close_bias=setup.get("entry_tf_close_bias", ""),
             notes=setup.get("notes", ""),
-            raw=setup.get("raw", {}),
+            raw={
+                # anything journaled without a dedicated column (tp1,
+                # runner_target, checklist, ...) stays available for
+                # pattern discovery instead of being dropped.
+                **{
+                    k: v
+                    for k, v in setup.items()
+                    if k not in _CONSUMED_SETUP_KEYS
+                },
+                **(setup.get("raw") or {}),
+            },
         )
         self._records.append(rec)
         if self.store is not None:

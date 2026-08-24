@@ -31,8 +31,11 @@ from trading_bot.strategy.smc.confluence import compute_confluence
 from trading_bot.strategy.smc.structure import StructureDetector
 from trading_bot.strategy.smc.zones import (
     Zone,
+    entry_zones,
     find_all_zones,
+    find_fvgs,
     find_liquidity_pools,
+    find_order_blocks,
 )
 
 
@@ -54,6 +57,7 @@ class SMCParams:
     max_zone_age_bars: Optional[int] = 60
     liquidity_min_touches: int = 2
     liquidity_window_bars: int = 60
+    fvg_requires_neighbor: bool = True  # Sec.6: FVG valid only beside OB/RB/breaker/liquidity
 
     # --- confirmation
     use_engulfing: bool = True
@@ -67,8 +71,10 @@ class SMCParams:
     zone_stack_tolerance: float = 0.3
 
     # --- entry / exit
-    min_rr: float = 2.0  # minimum 1:2 risk:reward
-    sl_buffer_points: float = 20.0  # volatility buffer beyond confirmation extreme
+    min_rr: float = 2.0  # minimum 1:2 risk:reward (Section 8: non-negotiable)
+    sl_buffer_points: float = 20.0  # fallback volatility buffer beyond confirmation extreme
+    sl_spread_mult: float = 2.0  # Section 9: SL buffer >= 1.5-2x typical spread
+    sl_atr_buffer_frac: float = 0.12  # Section 9: + ~10-15% ATR volatility cushion
     zone_proximity_atr_mult: float = 2.0  # max distance from zone to consider "reached"
     max_attempts: int = 2
     chase_tolerance_atr_mult: float = 1.5  # skip if price already ran this far past zone
@@ -78,6 +84,8 @@ class SMCParams:
     require_confirmation: bool = True
     require_bias: bool = True
     require_min_confluence: bool = True
+    use_dol_filter: bool = True  # Sec.7 Step 2: trade must point toward the DOL
+    require_ltf_entry_zone: bool = True  # Sec.7 Step 6: confirm at the LTF FVG/OB created by the CHoCH
 
     # --- atr
     atr_period: int = 14
@@ -90,10 +98,16 @@ class SMCParams:
 @register
 class SMCStrategy(BaseStrategy):
     name = "smc_crt"
-    version = "v1.0"
+    version = "v1.1"
+    parent_version = "v1.0"
     description = (
-        "SMC/ICT/CRT Confluence: HTF bias -> zone -> LTF CHoCH -> confirmation "
-        "candle -> entry at close. 1:2 RR min, max 2 attempts per level."
+        "SMC/ICT/CRT Confluence Framework v1.0: HTF CRT range + sweep->DOL bias -> "
+        "priority-ranked key level (Rejection>OB>FVG>Breaker; liquidity never a "
+        "standalone entry) with stacked-level conviction -> price AT the level -> "
+        "LTF CHoCH/CSD -> confirmation candle AT the resulting FVG/OB -> entry at "
+        "close. SL beyond pattern extreme + spread/ATR buffer (never on the wick), "
+        "TP1 = equilibrium/swing with hard 1:2 RR gate, runner toward opposing CRT "
+        "extreme. Max 2 attempts per level; attempt 2 requires a fresh sweep."
     )
     rules = [
         "no_confirmation_no_trade",
@@ -102,6 +116,10 @@ class SMCStrategy(BaseStrategy):
         "no_chasing",
         "htf_creates_zone_ltf_confirms_entry",
         "top_down_refinement_only",
+        "liquidity_never_standalone_entry",
+        "dol_direction_agreement",
+        "sl_buffer_spread_plus_atr",
+        "first_target_equilibrium_or_swing",
     ]
 
     def __init__(self, params: Optional[dict] = None):
@@ -233,11 +251,16 @@ class SMCStrategy(BaseStrategy):
         htf_key = self._htf_res.last_completed
         if htf_key != self._htf_cached_key:
             htf_state = self._htf_detector.update(htf_bars)
-            self._cached_bias = self._bias_engine.compute(htf_bars, htf_state)
+            # completed_only=True: the CRT range candle is the last COMPLETED
+            # HTF candle (the resampler view's final bar is still in-progress)
+            self._cached_bias = self._bias_engine.compute(
+                htf_bars, htf_state, completed_only=True
+            )
             self._cached_zones = find_all_zones(
                 zone_bars,
                 lookback=self.p.zone_lookback,
                 min_body_ratio=self.p.min_ob_body_ratio,
+                fvg_requires_neighbor=self.p.fvg_requires_neighbor,
             )
             self._cached_liquidity = find_liquidity_pools(
                 zone_bars,
@@ -256,15 +279,29 @@ class SMCStrategy(BaseStrategy):
             self._reject(ctx, "no_bias")
             return None
 
-        # filter to zones aligned with bias and near current price
+        # --- Section 7 Step 2: the Draw on Liquidity is computed on the HTF
+        # CRT range (see BiasEngine). The agreement check runs below, after
+        # `side` is resolved from the bias.
+
+        # filter to zones aligned with bias and near current price.
+        # Section 6: entry candidates are priority-ranked and NEVER include a
+        # bare liquidity pool (that is the destination, not an entry).
         side = bias.side
         aligned = [
-            z for z in zones
-            if z.direction == ("bullish" if side is Side.BUY else "bearish")
+            z for z in entry_zones(zones)
+            if side is not None
+            and z.direction == ("bullish" if side is Side.BUY else "bearish")
         ]
-        if not aligned:
+        if side is None or not aligned:
             self._reject(ctx, "no_aligned_zone")
             return None
+
+        # --- DOL agreement (Section 7 Step 2 / Master checklist)
+        if self.p.use_dol_filter and bias.dol is not None:
+            dol_is_buy = bias.dol == "high"
+            if (side is Side.BUY) != dol_is_buy:
+                self._reject(ctx, "against_dol", dol=bias.dol)
+                return None
 
         current_price = bars[-1].close
         atr = self._atr(bars) or (bars[-1].high - bars[-1].low) or 1e-5
@@ -331,6 +368,12 @@ class SMCStrategy(BaseStrategy):
             if conf_candle is None:
                 self._reject(ctx, "no_confirmation")
                 return None
+            # Section 7 Step 6: the entry must come from the FVG or Order Block
+            # CREATED by the trigger-timeframe CHoCH leg — not just anywhere.
+            if self.p.require_ltf_entry_zone and choch is not None:
+                if not self._confirmation_in_ltf_zone(bars, choch["index"]):
+                    self._reject(ctx, "no_ltf_entry_zone", choch_index=choch.get("index"))
+                    return None
         else:
             conf_candle = None
 
@@ -411,6 +454,83 @@ class SMCStrategy(BaseStrategy):
             return kind == "high"
         return kind == "low"
 
+    def _confirmation_in_ltf_zone(self, bars: Sequence[Candle], choch_index: int) -> bool:
+        """Section 7 Step 6: require the confirmation candle to sit at/inside
+        an FVG or Order Block formed by (or after) the LTF CHoCH leg."""
+        lookback = min(len(bars), max(20, len(bars) - choch_index + 5))
+        recent = bars[-lookback:]
+        offset = len(bars) - len(recent)
+        cbar = bars[-1]
+        obs = find_order_blocks(
+            recent, lookback=len(recent), min_body_ratio=self.p.min_ob_body_ratio
+        )
+        fvgs = find_fvgs(recent, lookback=len(recent))
+        for z in obs + fvgs:
+            z_abs = z.created_index + offset
+            if z_abs < choch_index:
+                continue  # must be part of the CHoCH leg's displacement
+            if z.contains(cbar.close) or (cbar.low <= z.top and cbar.high >= z.bottom):
+                return True
+        return False
+
+    def _typical_spread(self, ctx: Context, bars: Sequence[Candle]) -> float:
+        point = ctx.symbol_info.point_size or 0.0
+        recent = bars[-20:]
+        spreads = [float(b.spread) for b in recent if b.spread]
+        return (sum(spreads) / len(spreads)) * point if spreads and point else 0.0
+
+    def _sl_buffer(self, ctx: Context, bars: Sequence[Candle], atr: float) -> float:
+        """Section 9 buffer: at least sl_spread_mult x typical spread PLUS a
+        small ATR volatility cushion; never below the fallback floor. Candle
+        spread is stored in broker points -> convert via point_size (same
+        convention as the replay engine)."""
+        point = ctx.symbol_info.point_size or 0.0
+        typical = self._typical_spread(ctx, bars)
+        buf = self.p.sl_spread_mult * typical + atr * self.p.sl_atr_buffer_frac
+        floor = self.p.sl_buffer_points * point if point else 0.0
+        return max(buf, floor)
+
+    def _first_target(
+        self,
+        side: Side,
+        entry: float,
+        risk: float,
+        liquidity: Sequence[Zone],
+        ltf_swing: Optional[float],
+        crt_extreme: Optional[float],
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Section 7 Step 9 + Section 4 scaling.
+
+        First (scalp) target = nearest liquidity draw or next opposite swing
+        point. Returns (tp1, runner_target); tp1 is None when no candidate
+        offers at least ``min_rr`` reward (trade is then skipped). The runner
+        target is the opposing end of the HTF CRT range when beyond tp1."""
+        needed = entry + self.p.min_rr * risk if side is Side.BUY else entry - self.p.min_rr * risk
+
+        def viable(p: Optional[float]) -> bool:
+            if p is None:
+                return False
+            return p >= needed if side is Side.BUY else p <= needed
+
+        candidates: list[float] = []
+        if viable(ltf_swing):
+            candidates.append(ltf_swing)  # type: ignore[arg-type]
+        want_side = "above" if side is Side.BUY else "below"
+        for lz in liquidity:
+            edge_price = lz.top if side is Side.BUY else lz.bottom
+            if lz.extra.get("side") == want_side and viable(edge_price):
+                candidates.append(edge_price)
+        if not candidates:
+            return None, None
+        # first target = NEAREST qualifying draw / swing point
+        tp1 = min(candidates) if side is Side.BUY else max(candidates)
+        runner = None
+        if viable(crt_extreme) and (
+            crt_extreme > tp1 if side is Side.BUY else crt_extreme < tp1
+        ):
+            runner = crt_extreme
+        return tp1, runner if runner is not None else tp1
+
     def _build_signal(
         self,
         side: Side,
@@ -424,40 +544,70 @@ class SMCStrategy(BaseStrategy):
         choch,
         ctx: Context,
     ) -> Optional[Signal]:
-        entry = bars[-1].close
-        # SL: beyond confirmation extreme (entry candle low for buy / high for sell)
-        # with a volatility buffer in points.
-        buf = self.p.sl_buffer_points * ctx.symbol_info.point_size if ctx.symbol_info.point_size else atr * 0.05
+        entry = bars[-1].close  # Section 7 Step 7: close of confirmation bar only
+
+        # ---- Section 9: SL beyond the confirmation pattern extreme
+        # (furthest-back wick in the cluster), plus spread+ATR buffer.
+        buf = self._sl_buffer(ctx, bars, atr)
+        if conf_candle is not None and conf_candle.sl_reference:
+            extreme = conf_candle.sl_reference
+        else:
+            extreme = bars[-1].low if side is Side.BUY else bars[-1].high
+
+        # Gap rule (Section 9): if the entry-to-wick gap < minimum buffer the
+        # stop would be unreasonably tight -> skip rather than force-fit.
+        gap = abs(entry - extreme)
+        if gap < buf:
+            return None
+
         if side is Side.BUY:
-            extreme = bars[-1].low
             sl = extreme - buf
             risk = entry - sl
             if risk <= 0:
                 return None
-            tp_2r = entry + self.p.min_rr * risk
-            # the zone target should be reachable at >= 2R; else the trade is
-            # geometrically impossible -> reject (never fabricate a TP)
-            if zone.top <= tp_2r + atr * 0.5:
-                # zone is near/at 2R: place TP at the max of 2R and a target
-                # just beyond the zone (still >= 2R)
-                tp = max(tp_2r, zone.top + atr * 0.5)
-            else:
-                return None
-            if tp <= entry:
-                return None
         else:
-            extreme = bars[-1].high
             sl = extreme + buf
             risk = sl - entry
             if risk <= 0:
                 return None
-            tp_2r = entry - self.p.min_rr * risk
-            if zone.bottom >= tp_2r - atr * 0.5:
-                tp = min(tp_2r, zone.bottom - atr * 0.5)
-            else:
-                return None
-            if tp >= entry:
-                return None
+
+        # ---- Section 7 Step 9: TP1 from real structure (nearest liquidity
+        # draw / opposite swing point); hard >= min-RR gate or skip entirely.
+        ltf_state = getattr(self, "_ltf_detector", None)
+        ltf_swing = None
+        if ltf_state is not None:
+            st = ltf_state.state
+            ltf_swing = (
+                st.last_swing_high.price if side is Side.BUY else st.last_swing_low.price
+            )
+        crt_extreme = bias.crt_high if bias.crt_valid else None
+        tp, runner_target = self._first_target(
+            side, entry, risk, self._cached_liquidity, ltf_swing, crt_extreme
+        )
+        if tp is None:
+            return None
+        if side is Side.BUY and tp <= entry:
+            return None
+        if side is Side.SELL and tp >= entry:
+            return None
+
+        rr = abs(tp - entry) / risk
+        checklist = {
+            "htf_range_marked": bias.crt_valid,
+            "bias_identified": bias.side is not None,
+            "dol_agrees": (not self.p.use_dol_filter)
+            or bias.dol is None
+            or ((side is Side.BUY) == (bias.dol == "high")),
+            "zone_priority_respected": True,
+            "confluence_checked": conf is not None,
+            "price_at_level": True,
+            "choch_confirmed": choch is not None,
+            "candle_confirmation_closed": conf_candle is not None,
+            "entry_at_close": True,
+            "sl_buffered": buf > 0,
+            "rr_min_met": rr >= self.p.min_rr,
+            "attempt_valid": attempts + 1 <= self.p.max_attempts,
+        }
 
         sig = ctx.signal(
             side=side,
@@ -470,12 +620,18 @@ class SMCStrategy(BaseStrategy):
             "bias": bias.side.value if bias.side else None,
             "htf_bias": bias.source,
             "crt": "crt" if bias.crt_triggered else "",
+            "crt_high": bias.crt_high,
+            "crt_low": bias.crt_low,
+            "inside_bars": bias.inside_bars,
+            "dol": bias.dol,
             "zone_type": zone.kind,
             "zone_top": zone.top,
             "zone_bottom": zone.bottom,
             "confluence_level": conf.level.value if conf else "",
             "confluence_score": conf.score if conf else 0,
             "confluence_factors": conf.factors if conf else [],
+            "stack_count": conf.stack_count if conf else 0,
+            "stack_kinds": conf.stack_kinds if conf else [],
             "htf_timeframe": self.p.htf,
             "ltf_timeframe": self.p.ltf,
             "refinement_chain": f"{self.p.htf}->{self.p.ltf}",
@@ -484,6 +640,13 @@ class SMCStrategy(BaseStrategy):
             "attempt": attempts + 1,
             "session": ctx.current.time and "",
             "volatility": atr,
+            # --- Section 4 / Section 9 execution metadata
+            "tp1": tp,
+            "runner_target": runner_target,
+            "tp1_r": round(rr, 3),
+            "sl_buffer": buf,
+            "spread_used": self._typical_spread(ctx, bars),
+            "checklist": checklist,
         })
         return sig
 

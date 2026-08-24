@@ -202,6 +202,6 @@ class FileDataProvider(DataProvider):
             point_size=pt,
             contract_size=100_000,
             lot_min=0.01,
-            lot_max=100.0,
+            lot_max=200.0,
             lot_step=0.01,
         )

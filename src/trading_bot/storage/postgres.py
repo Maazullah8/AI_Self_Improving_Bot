@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 
 from trading_bot.core.models import TradeRecord
 from trading_bot.storage.interfaces import (
+    ExperimentRecord,
     HeartbeatRecord,
     ReviewRecord,
     SignalRecord,
@@ -100,6 +101,30 @@ CREATE TABLE IF NOT EXISTS reviews (
     hypothesis TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS experiments (
+    id BIGSERIAL PRIMARY KEY,
+    experiment_id TEXT NOT NULL UNIQUE,
+    strategy TEXT NOT NULL,
+    parent_version TEXT NOT NULL DEFAULT '',
+    candidate_version TEXT NOT NULL DEFAULT '',
+    hypothesis TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    change_description TEXT NOT NULL DEFAULT '',
+    expected_effect TEXT NOT NULL DEFAULT '',
+    actual_effect TEXT NOT NULL DEFAULT '',
+    backtest_results JSONB NOT NULL DEFAULT '{}',
+    walk_forward_results JSONB NOT NULL DEFAULT '{}',
+    monte_carlo_results JSONB NOT NULL DEFAULT '{}',
+    comparison_results JSONB NOT NULL DEFAULT '{}',
+    dataset_start BIGINT NOT NULL DEFAULT 0,
+    dataset_end BIGINT NOT NULL DEFAULT 0,
+    decision TEXT NOT NULL DEFAULT 'running',
+    decision_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_experiments_strategy ON experiments (strategy, created_at);
 """
 
 
@@ -117,6 +142,7 @@ class PostgresStore:
         self.signals = _PGSignalStore(conn)
         self.heartbeats = _PGHeartbeatStore(conn)
         self.reviews = _PGReviewStore(conn)
+        self.experiments = _PGExperimentStore(conn)
 
     @classmethod
     def from_dsn(cls, dsn: str) -> "PostgresStore":
@@ -458,3 +484,123 @@ class _PGReviewStore:
                 )
             )
         return out
+
+
+class _PGExperimentStore:
+    """Append-only experiment history (Section 3)."""
+
+    _ALLOWED_UPDATE = {
+        "candidate_version", "actual_effect", "backtest_results",
+        "walk_forward_results", "monte_carlo_results", "comparison_results",
+        "decision", "decision_reason", "updated_at",
+    }
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    @staticmethod
+    def _row_to_experiment(row) -> ExperimentRecord:
+        return ExperimentRecord(
+            id=row["experiment_id"],
+            strategy=row["strategy"],
+            parent_version=row["parent_version"] or "",
+            candidate_version=row["candidate_version"] or "",
+            hypothesis=row["hypothesis"] or "",
+            reason=row["reason"] or "",
+            change_description=row["change_description"] or "",
+            expected_effect=row["expected_effect"] or "",
+            actual_effect=row["actual_effect"] or "",
+            backtest_results=row.get("backtest_results") or {},
+            walk_forward_results=row.get("walk_forward_results") or {},
+            monte_carlo_results=row.get("monte_carlo_results") or {},
+            comparison_results=row.get("comparison_results") or {},
+            dataset_start=int(row.get("dataset_start") or 0),
+            dataset_end=int(row.get("dataset_end") or 0),
+            decision=row["decision"] or "running",
+            decision_reason=row["decision_reason"] or "",
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def create(self, rec: ExperimentRecord) -> ExperimentRecord:
+        if not rec.created_at:
+            rec.created_at = utcnow_iso()
+        rec.updated_at = utcnow_iso()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO experiments
+                  (experiment_id, strategy, parent_version, candidate_version,
+                   hypothesis, reason, change_description, expected_effect,
+                   actual_effect, backtest_results, walk_forward_results,
+                   monte_carlo_results, comparison_results, dataset_start,
+                   dataset_end, decision, decision_reason, created_at, updated_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (experiment_id) DO NOTHING
+                """,
+                (
+                    rec.id,
+                    rec.strategy,
+                    rec.parent_version,
+                    rec.candidate_version,
+                    rec.hypothesis,
+                    rec.reason,
+                    rec.change_description,
+                    rec.expected_effect,
+                    rec.actual_effect,
+                    json.dumps(rec.backtest_results),
+                    json.dumps(rec.walk_forward_results),
+                    json.dumps(rec.monte_carlo_results),
+                    json.dumps(rec.comparison_results),
+                    rec.dataset_start,
+                    rec.dataset_end,
+                    rec.decision,
+                    rec.decision_reason,
+                    rec.created_at,
+                    rec.updated_at,
+                ),
+            )
+        self._conn.commit()
+        return rec
+
+    def get(self, experiment_id: str) -> Optional[ExperimentRecord]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM experiments WHERE experiment_id=%s",
+                (experiment_id,),
+            )
+            row = cur.fetchone()
+        return self._row_to_experiment(row) if row else None
+
+    def list(
+        self,
+        strategy: Optional[str] = None,
+        limit: int = 500,
+    ) -> list[ExperimentRecord]:
+        with self._conn.cursor() as cur:
+            if strategy:
+                cur.execute(
+                    "SELECT * FROM experiments WHERE strategy=%s ORDER BY created_at",
+                    (strategy,),
+                )
+            else:
+                cur.execute("SELECT * FROM experiments ORDER BY created_at")
+            rows = cur.fetchall()
+        return [self._row_to_experiment(r) for r in rows][-limit:]
+
+    def update(self, experiment_id: str, **fields) -> Optional[ExperimentRecord]:
+        sets = [k for k in fields if k in self._ALLOWED_UPDATE]
+        if not sets:
+            return self.get(experiment_id)
+        set_sql = ", ".join(f"{k}=%s" for k in sets) + ", updated_at=%s"
+        vals = [
+            json.dumps(fields[k]) if isinstance(fields[k], (dict, list)) else fields[k]
+            for k in sets
+        ]
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"UPDATE experiments SET {set_sql} WHERE experiment_id=%s",
+                (*vals, utcnow_iso(), experiment_id),
+            )
+        self._conn.commit()
+        return self.get(experiment_id)

@@ -259,5 +259,8 @@ class TestWalkForward:
         wf = run_walk_forward(runner, "smc_crt", params, "v1.0", cfg, n_windows=4)
         assert len(wf.windows) == 4
         assert len(wf.val_expectancy_r) == 4
-        # every window must have a train and val result
-        assert all(w.train is not None and w.val is not None for w in wf.windows)
+        # every window must have a val result; the FIRST window has no
+        # training history (train_start == train_end), later ones do
+        assert all(w.val is not None for w in wf.windows)
+        assert wf.windows[0].train is None
+        assert all(w.train is not None for w in wf.windows[1:])

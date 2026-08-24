@@ -16,7 +16,7 @@ import time as _time
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
-from trading_bot.core.enums import ExitReason, PositionStatus, Side
+from trading_bot.core.enums import ExitReason, PositionStatus, Side,OrderType
 from trading_bot.core.models import Candle, Order, Position, TradeRecord
 from trading_bot.core.time_utils import utcnow_ts
 from trading_bot.data.base import DataProvider, MarketDataQuery, SymbolInfo
@@ -170,7 +170,10 @@ class LiveTradePipeline:
             return []
         bars.sort(key=lambda c: c.time)
         # keep only closed bars (a live bar isn't complete until the next opens)
-        closed = [b for b in bars if b.time < _bar_end(b.time, tf)]
+        closed = [
+        b for b in bars
+        if _bar_end(b.time, tf) <= now
+        ]
         return closed
 
     # ------------------------------------------------------------ signal
@@ -199,7 +202,7 @@ class LiveTradePipeline:
             id=f"live_{utcnow_ts()}_{self.state.n_orders}",
             symbol=signal.symbol or self.config.symbol,
             side=signal.side,
-            type="market",
+            type=OrderType.MARKET,
             size=size,
             price=signal.entry,
             sl=signal.sl,

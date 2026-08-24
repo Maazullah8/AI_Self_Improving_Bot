@@ -155,19 +155,32 @@ def find_rejection_blocks(
     bars: Sequence[Candle],
     lookback: int = 200,
     min_wick_ratio: float = 1.5,
+    sweep_window: int = 10,
 ) -> list[Zone]:
-    """Rejection blocks: a candle with a large wick against the move direction,
-    signaling a reversal area. A long lower wick => bullish zone (support)."""
+    """Rejection blocks (Section 6, highest-priority level).
+
+    Forms after a PROTECTED/SWEPT low or high: the candle must first purge
+    (wick beyond) the extreme of the preceding ``sweep_window`` bars, then
+    reject with a dominant wick and a close back on the rejection side.
+      - long lower wick after sweeping prior lows => bullish zone
+      - long upper wick after sweeping prior highs => bearish zone
+    """
     out: list[Zone] = []
     n = len(bars)
-    start = max(0, n - lookback)
+    start = max(sweep_window, n - lookback)
     for i in range(start, n):
         c = bars[i]
         if c.range <= 0:
             continue
+        window = bars[i - sweep_window : i]
+        if not window:
+            continue
+        swept_low = c.low < min(b.low for b in window)
+        swept_high = c.high > max(b.high for b in window)
         lower_ratio = c.lower_wick / c.range
         upper_ratio = c.upper_wick / c.range
-        if lower_ratio >= min_wick_ratio / (1 + min_wick_ratio) and c.close > c.midpoint:
+        wick_frac = min_wick_ratio / (1 + min_wick_ratio)
+        if swept_low and lower_ratio >= wick_frac and c.close > c.midpoint:
             out.append(
                 Zone(
                     kind="rejection_block",
@@ -179,7 +192,7 @@ def find_rejection_blocks(
                     strength=lower_ratio,
                 )
             )
-        elif upper_ratio >= min_wick_ratio / (1 + min_wick_ratio) and c.close < c.midpoint:
+        elif swept_high and upper_ratio >= wick_frac and c.close < c.midpoint:
             out.append(
                 Zone(
                     kind="rejection_block",
@@ -279,6 +292,59 @@ def find_breakers(
     return out
 
 
+def fvg_with_neighbors(
+    fvgs: Sequence[Zone],
+    other_zones: Sequence[Zone],
+    tolerance_frac: float = 0.25,
+) -> list[Zone]:
+    """Section 6: an FVG is valid only when it sits directly beside an Order
+    Block, Rejection Block, Breaker, or liquidity pool. An FVG with nothing
+    else nearby is lower conviction and is SKIPPED.
+
+    'Near' = overlapping, or within ``tolerance_frac`` of the FVG's depth.
+    """
+    out: list[Zone] = []
+    for f in fvgs:
+        if f.depth <= 0:
+            continue
+        tol = f.depth * tolerance_frac
+        for z in other_zones:
+            if z.kind == "fvg":
+                continue
+            overlaps = f.bottom <= z.top and z.bottom <= f.top
+            near = (
+                abs(f.bottom - z.top) <= tol
+                or abs(z.bottom - f.top) <= tol
+            )
+            if overlaps or near:
+                out.append(f)
+                break
+    return out
+
+
+# Section 6 hierarchy: highest to lowest priority for entry zones.
+LEVEL_PRIORITY = {
+    "rejection_block": 0,
+    "order_block": 1,
+    "fvg": 2,
+    "breaker": 3,
+    "liquidity": 4,
+}
+
+
+def entry_zones(zones: Sequence[Zone]) -> list[Zone]:
+    """Return tradeable ENTRY zones in priority order.
+
+    A liquidity pool is NEVER a standalone entry zone (Section 6): it is used
+    only as the destination (draw on liquidity) or as the sweep that must
+    occur before a level is valid.
+    """
+    return sorted(
+        (z for z in zones if z.kind != "liquidity"),
+        key=lambda z: LEVEL_PRIORITY.get(z.kind, 9),
+    )
+
+
 def find_all_zones(
     bars: Sequence[Candle],
     lookback: int = 200,
@@ -288,16 +354,21 @@ def find_all_zones(
     include_breaker: bool = True,
     include_liquidity: bool = True,
     min_body_ratio: float = 0.5,
+    fvg_requires_neighbor: bool = True,
 ) -> list[Zone]:
     out: list[Zone] = []
     if include_ob:
         out.extend(find_order_blocks(bars, lookback=lookback, min_body_ratio=min_body_ratio))
-    if include_fvg:
-        out.extend(find_fvgs(bars, lookback=lookback))
     if include_rejection:
         out.extend(find_rejection_blocks(bars, lookback=lookback))
     if include_breaker:
         out.extend(find_breakers(bars, lookback=lookback))
+    if include_fvg:
+        fvgs = find_fvgs(bars, lookback=lookback)
+        if fvg_requires_neighbor:
+            # Section 6: skip FVGs with no OB/rejection/breaker/liquidity beside them
+            fvgs = fvg_with_neighbors(fvgs, out)
+        out.extend(fvgs)
     if include_liquidity:
         out.extend(find_liquidity_pools(bars, lookback=lookback))
     return out

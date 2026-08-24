@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, FlaskConical, Play, RefreshCw } from "lucide-react";
+import { CheckCircle2, Database, FlaskConical, Play, RefreshCw } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
 import { EquityChart, MonteCarloChart, WalkForwardChart } from "@/components/charts";
@@ -48,6 +48,13 @@ export default function BacktestingPage() {
   const [error, setError] = useState(null);
   const [mcTab, setMcTab] = useState("paths");
   const [timeframe, setTimeframe] = useState("5m");
+  const [dataSource, setDataSource] = useState(null);
+  const [jobId, setJobId] = useState(null);
+  const [progress, setProgress] = useState(null);
+  const [liveEquity, setLiveEquity] = useState(null);
+  const [wasCancelled, setWasCancelled] = useState(false);
+  const [initialCash, setInitialCash] = useState(10000);
+  const [initialPrice, setInitialPrice] = useState("");
   const [rangeFrom, setRangeFrom] = useState(() => ymd(new Date(Date.now() - 6 * 30 * 86400)));
   const [rangeTo, setRangeTo] = useState(() => ymd(new Date()));
 
@@ -61,7 +68,11 @@ export default function BacktestingPage() {
         setRangeTo(ymd(new Date(d.end * 1000)));
       })
       .catch(() => {});
-  }, []);
+    fetch(`/api/data-source?symbol=XAUUSD&timeframe=${timeframe}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then(setDataSource)
+      .catch(() => setDataSource(null));
+  }, [timeframe]);
 
   const versions = data?.strategies || [];
 
@@ -69,8 +80,11 @@ export default function BacktestingPage() {
     setRunning(true);
     setError(null);
     setResult(null);
+    setLiveEquity(null);
+    setProgress(null);
+    setWasCancelled(false);
     try {
-      const r = await fetch("/api/backtest", {
+      const r = await fetch("/api/backtest/async", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -78,25 +92,78 @@ export default function BacktestingPage() {
           timeframe,
           start: ymdToEpoch(rangeFrom),
           end: ymdToEpoch(rangeTo, true),
-          initial_cash: 10000.0,
+          initial_cash: Number(initialCash) || 10000,
+          initial_price: Number(initialPrice) || 0,
           strategy: "smc_crt",
           params: { htf: "4h", zone_tf: "4h", ltf: "5m" },
           seed: 42,
         }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const body = await r.json();
-      setResult(body);
+      const { job_id } = await r.json();
+      setJobId(job_id);
+      pollJob(job_id);
     } catch (e) {
       setError(String(e));
-    } finally {
       setRunning(false);
+    }
+  }
+
+  async function pollJob(id) {
+    for (;;) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((res) => setTimeout(res, 1200));
+      let status;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const pr = await fetch(`/api/backtest/job/${id}`);
+        if (!pr.ok) throw new Error(`HTTP ${pr.status}`);
+        // eslint-disable-next-line no-await-in-loop
+        status = await pr.json();
+      } catch (e) {
+        setError(`Connection lost: ${e}`);
+        setRunning(false);
+        setJobId(null);
+        return;
+      }
+      if (status.status === "running") {
+        const prog = status.progress || {};
+        if (typeof prog.equity === "number") {
+          setProgress(prog);
+          setLiveEquity((prev) => {
+            const arr = prev ? [...prev] : [];
+            arr.push({ name: fmtDate(prog.time), value: Math.round(prog.equity) });
+            return arr.slice(-400);
+          });
+        }
+        continue;
+      }
+      setRunning(false);
+      setJobId(null);
+      setProgress(null);
+      if (status.status === "error") {
+        setError(status.error || "unknown backend error");
+        return;
+      }
+      if (status.status === "cancelled") setWasCancelled(true);
+      setResult(status.result);
+      return;
+    }
+  }
+
+  async function cancelBacktest() {
+    if (jobId) {
+      try {
+        await fetch(`/api/backtest/job/${jobId}/cancel`, { method: "POST" });
+      } catch (e) {
+        setError(String(e));
+      }
     }
   }
 
   const metrics = result?.metrics ?? result ?? {};
   const equityData = useMemo(() => {
-    const eq = result?.equity_curve || [];
+    const eq = result?.equity_curve || liveEquity || [];
     if (!eq.length) return null;
     // thin out long curves so the chart stays smooth
     const step = Math.max(1, Math.floor(eq.length / 400));
@@ -104,7 +171,7 @@ export default function BacktestingPage() {
       name: fmtDate(p.time),
       value: Math.round(p.equity),
     }));
-  }, [result]);
+  }, [result, liveEquity]);
   const mc = result?.monte_carlo;
   const mcPositive = mc && mc.risk_of_ruin_pct < 5 && mc.worst_dd_pct_95 < 40;
   const mcStats = [
@@ -191,6 +258,79 @@ export default function BacktestingPage() {
         <StatCard label="Backtests Run" value="—" subvalue="From the /api/backtest endpoint" />
       </div>
 
+      <Card
+        title="Data Source"
+        subtitle="Where backtest candles are loaded from"
+        className=""
+        action={<Database className="size-4 text-ai" />}
+      >
+        <div className="space-y-2">
+          {(dataSource?.providers || []).map((p, i) => {
+            const isActive =
+              dataSource?.active == null
+                ? i === 0
+                : dataSource.active === i || dataSource.active === p.name;
+            const loc = p.path || p.url || "";
+            return (
+              <div
+                key={`${p.name}-${i}`}
+                className={`flex items-start gap-3 rounded-lg border p-3 ${
+                  isActive ? "bg-ai/10 border-ai/30" : "bg-muted/20 border-border/40"
+                }`}
+              >
+                <span
+                  className={`mt-0.5 size-2 rounded-full shrink-0 ${
+                    p.ok === false ? "bg-loss" : isActive ? "bg-ai" : "bg-muted-foreground/40"
+                  }`}
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="font-medium truncate">
+                      {p.source_label || p.name}
+                    </span>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground shrink-0">
+                      {isActive ? "active" : "fallback"}
+                      {p.ok === false ? " · unavailable" : ""}
+                    </span>
+                  </div>
+                  {loc && (
+                    <div className="mt-0.5 font-mono text-[10px] text-muted-foreground break-all">
+                      {loc}
+                      {p.table ? ` · table: ${p.table}` : ""}
+                    </div>
+                  )}
+                  <div className="mt-0.5 flex flex-wrap gap-x-3 text-[10px] text-muted-foreground tabular-nums">
+                    {typeof p.count === "number" && <span>{fmtNum(p.count, 0)} bars</span>}
+                    {dataSource?.range?.start > 0 && isActive && (
+                      <>
+                        <span>
+                          coverage {fmtDate(dataSource.range.start)} – {fmtDate(dataSource.range.end)}
+                        </span>
+                        <span>{fmtNum(dataSource.range.n_bars, 0)} bars in range</span>
+                      </>
+                    )}
+                  </div>
+                  {p.ok === false && p.name === "supabase" && (
+                    <div className="mt-1 text-[10px] text-muted-foreground">
+                      Not configured yet — add{" "}
+                      <code className="font-mono">SUPABASE_URL</code> /{" "}
+                      <code className="font-mono">SUPABASE_KEY</code> to the{" "}
+                      <code className="font-mono">.env</code> file in the repo root
+                      (see <code className="font-mono">.env.example</code>).
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {!dataSource && (
+            <div className="py-6 text-center text-xs text-muted-foreground">
+              Start the API server (python -m trading_bot.api.run) to see the data source.
+            </div>
+          )}
+        </div>
+      </Card>
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card title="Validation Workflow" subtitle="Results from the last backtest" className="lg:col-span-2">
           {validationSteps.length ? (
@@ -221,6 +361,31 @@ export default function BacktestingPage() {
 
         <Card title="Run Backtest" subtitle="Live backend via /api/backtest">
           <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Initial capital ($)</label>
+                <input
+                  type="number"
+                  min="100"
+                  step="100"
+                  value={initialCash}
+                  onChange={(e) => setInitialCash(e.target.value)}
+                  className="w-full rounded-md bg-muted/20 border border-border px-2 py-1.5 text-xs tabular-nums"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-muted-foreground mb-1.5">Initial price (synthetic)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="auto"
+                  value={initialPrice}
+                  onChange={(e) => setInitialPrice(e.target.value)}
+                  className="w-full rounded-md bg-muted/20 border border-border px-2 py-1.5 text-xs tabular-nums placeholder:text-muted-foreground/50"
+                />
+              </div>
+            </div>
             <div className="space-y-2.5">
               <div>
                 <div className="text-[11px] font-medium text-muted-foreground mb-1.5">Date range</div>
@@ -294,17 +459,46 @@ export default function BacktestingPage() {
               </div>
             </div>
 
-            <button
-              onClick={runBacktest}
-              disabled={running}
-              className="flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-ai text-white text-xs font-medium hover:bg-ai/90 disabled:opacity-50 transition-colors"
-            >
-              {running ? <RefreshCw className="size-4 animate-spin" /> : <Play className="size-4" />}
-              {running ? "Running backtest…" : "Run backtest (XAUUSD, smc_crt)"}
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={runBacktest}
+                disabled={running}
+                className="flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md bg-ai text-white text-xs font-medium hover:bg-ai/90 disabled:opacity-50 transition-colors"
+              >
+                {running ? <RefreshCw className="size-4 animate-spin" /> : <Play className="size-4" />}
+                {running ? "Running…" : "Run backtest (XAUUSD, smc_crt)"}
+              </button>
+              {running && jobId && (
+                <button
+                  onClick={cancelBacktest}
+                  className="px-3 py-2 rounded-md bg-loss/20 border border-loss/40 text-loss text-xs font-medium hover:bg-loss/30 transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+            {running && progress && typeof progress.equity === "number" && (
+              <div className="rounded-md bg-ai/10 border border-ai/30 px-3 py-2 text-xs tabular-nums space-y-0.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Live equity</span>
+                  <span className="font-semibold">${fmtNum(progress.equity, 2)}</span>
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                  <span>bar {fmtNum(progress.bar_index, 0)} / {fmtNum(progress.n_bars, 0)}</span>
+                  <span>{fmtNum(progress.n_trades, 0)} trades so far</span>
+                  <span>{Math.round((progress.bar_index / Math.max(1, progress.n_bars)) * 100)}%</span>
+                </div>
+              </div>
+            )}
             {error && (
               <div className="rounded-md bg-loss/10 border border-loss/30 p-3 text-xs text-loss">
                 Backtest failed: {error}. Start the API server with the provider configured.
+              </div>
+            )}
+            {wasCancelled && result && (
+              <div className="rounded-md bg-ai/10 border border-ai/30 p-3 text-xs text-ai">
+                Backtest cancelled — showing results up to the cancellation point
+                ({fmtNum(result.n_bars, 0)} bars, {fmtNum(result.n_trades, 0)} trades).
               </div>
             )}
             {result && (

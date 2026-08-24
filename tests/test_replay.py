@@ -18,7 +18,7 @@ from trading_bot.replay.engine import (
 def _sym(digits=5, contract_size=1):
     return SymbolInfo(
         symbol="EURUSD", digits=digits, tick_size=1e-5, point_size=1e-5,
-        contract_size=contract_size, lot_min=0.01, lot_max=100.0, lot_step=0.01,
+        contract_size=contract_size, lot_min=0.01, lot_max=200.0, lot_step=0.01,
     )
 
 
@@ -216,6 +216,10 @@ class TestNoBrokerAccess:
     def test_engine_never_imports_mt5(self):
         import sys
 
-        assert "MetaTrader5" not in sys.modules or not sys.modules["MetaTrader5"]
+        # Hermetic: other test modules may legitimately import broker SDKs;
+        # what matters is that RUNNING the engine does not pull one in.
+        mt5_loaded_before = "MetaTrader5" in sys.modules and sys.modules["MetaTrader5"] is not None
         bars = _bars([1.10, 1.11])
         _run(bars, _NeverTrade())
+        mt5_loaded_after = "MetaTrader5" in sys.modules and sys.modules["MetaTrader5"] is not None
+        assert mt5_loaded_after == mt5_loaded_before

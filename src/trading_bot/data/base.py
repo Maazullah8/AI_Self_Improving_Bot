@@ -33,7 +33,7 @@ class SymbolInfo:
     point_size: float
     contract_size: int = 100_000  # units of base per 1.0 lot
     lot_min: float = 0.01
-    lot_max: float = 100.0
+    lot_max: float = 200.0
     lot_step: float = 0.01
     currency: str = ""
     margin_rate: float = 0.0

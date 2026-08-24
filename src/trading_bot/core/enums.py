@@ -95,6 +95,7 @@ class Regime(str, Enum):
     TRENDING_DOWN = "trending_down"
     RANGING = "ranging"
     HIGH_VOLATILITY = "high_volatility"
+    LOW_VOLATILITY = "low_volatility"
     UNKNOWN = "unknown"
 
 
@@ -111,6 +112,7 @@ class StrategyStatus(str, Enum):
     PROMOTED = "promoted"
     LIVE = "live"
     DISABLED = "disabled"
+    ROLLED_BACK = "rolled_back"
 
 
 class ConfluenceLevel(str, Enum):

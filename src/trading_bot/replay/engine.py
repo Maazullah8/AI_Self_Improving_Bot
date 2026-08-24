@@ -21,6 +21,8 @@ from typing import Callable, Optional, Sequence, Union
 
 from trading_bot.core.enums import ExitReason, OrderStatus, OrderType, PositionStatus, Side
 from trading_bot.core.models import Candle, Order, Position, PriceLevel, Tick
+from trading_bot.core.time_utils import ts_to_dt
+from trading_bot.core.regime import detect_regime
 from trading_bot.data.base import SymbolInfo
 
 
@@ -42,11 +44,11 @@ class ExecutionConfig:
 @dataclass(frozen=True)
 class ReplayConfig:
     initial_cash: float = 10_000.0
-    symbol_info: SymbolInfo = None  # type: ignore[assignment]
+    symbol_info: SymbolInfo = None
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     allow_multiple_positions: bool = False
     seed: Optional[int] = None
-
+    fail_on_strategy_error: bool = False
 
 @dataclass
 class Signal:
@@ -130,7 +132,7 @@ class ReplayEngine:
         self.candles = sorted(candles, key=lambda c: c.time)
         self.config = config
         self.sym = config.symbol_info or SymbolInfo(
-            symbol="", digits=5, tick_size=1e-5, point_size=1e-5
+            symbol="", digits=5, tick_size=1e-5, point_size=0.01
         )
         self.risk = risk_manager
         self.journal = journal
@@ -139,6 +141,7 @@ class ReplayEngine:
         self.fills: list[Fill] = []
         self.equity_curve: list[EquityPoint] = []
         self._setups: dict[str, dict] = {}
+        self._current_regime: str = ""
         self._cash = config.initial_cash
         self._seq = 0
         self._rng = None
@@ -172,7 +175,24 @@ class ReplayEngine:
         return price - slip
 
     def _spread_for_bar(self, bar: Candle) -> float:
-        return bar.spread if bar.spread else self.sym.point_size * 1.0
+        """Return spread as a PRICE distance.
+
+        Convention across the whole pipeline: ``Candle.spread`` stores the
+        spread in PRICE units (see ``core.models.Candle``). Providers that
+        natively work in broker points (MT5) convert to price units at
+        ingestion, so no further conversion happens here.
+
+        Example for XAUUSD:
+            spread = 1.62 (price distance)
+            point_size = 0.01
+
+        If a candle carries no spread info we fall back to one point so
+        fills still model a minimal transaction cost.
+        """
+        if bar.spread and bar.spread > 0:
+            return float(bar.spread)
+
+        return self._point_size()
 
     def _fill_price(self, side: Side, ref_price: float, bar: Candle) -> float:
         """Market fill price at signal close, including spread + slippage.
@@ -233,6 +253,17 @@ class ReplayEngine:
                 type=OrderType.MARKET,
             )
         )
+        print("\n========== EXECUTION DEBUG ==========")
+        print(f"Signal entry:    {signal.entry}")
+        print(f"Actual fill:     {fill_price}")
+        print(f"Spread points:   {bar.spread}")
+        print(f"Spread price:    {self._spread_for_bar(bar)}")
+        print(f"Point size:      {self._point_size()}")
+        print(f"SL:              {signal.sl}")
+        print(f"TP:              {signal.tp}")
+        print(f"Size/lots:       {size}")
+        print(f"Contract size:   {self._contract_size()}")
+        print("======================================")
         if self.risk is not None:
             self.risk.on_position_open(pos)
         return pos
@@ -261,24 +292,63 @@ class ReplayEngine:
         return self._point_size()
 
     # ----------------------------------------------------------- bar pipeline
-    def run(self, strategy) -> ReplayResult:
+    def run(
+        self,
+        strategy,
+        cancel_check=None,
+        on_progress=None,
+        progress_every: int = 2000,
+    ) -> ReplayResult:
         """Run the strategy over all bars. ``strategy`` must expose
         ``on_bar(ctx) -> Optional[Signal]`` where ctx is a Context with the
-        closed-bar history."""
+        closed-bar history.
+
+        Optional cooperative cancellation / progress reporting (used by the
+        dashboard so long backtests can be cancelled and watched live):
+          - ``cancel_check``: zero-arg callable; when it returns True the run
+            stops at the current bar, open positions are flattened at that
+            bar's close and a PARTIAL result is returned (``self.cancelled``
+            is set to True).
+          - ``on_progress``: callable receiving a dict snapshot every
+            ``progress_every`` bars (bar_index, n_bars, time, equity,
+            n_trades).
+        """
+        self.cancelled = False
         n = len(self.candles)
         for i in range(n):
+            if cancel_check is not None and cancel_check():
+                self.cancelled = True
+                last_bar = self.candles[i]
+                self._close_all(
+                    PositionStatus.FLATTENED, ExitReason.STRATEGY_EXIT, last_bar
+                )
+                break
             bar = self.candles[i]
             self._manage_positions(bar)
             # snapshot equity BEFORE new entries so signals can't leak fills
             self._snapshot_equity(bar)
             if self.risk is not None:
                 self.risk.on_bar_end(bar, self._equity(), self.positions)
+            if on_progress is not None and (i % max(1, progress_every) == 0):
+                try:
+                    on_progress({
+                        "bar_index": i,
+                        "n_bars": n,
+                        "time": bar.time,
+                        "equity": self._equity(),
+                        "n_trades": len(self.trades),
+                    })
+                except Exception:
+                    pass  # progress reporting must never break the run
+            self._current_regime = detect_regime(self.candles[max(0, i - 59) : i + 1])
             ctx = Context(self, i)
             try:
                 signal = strategy.on_bar(ctx)
             except Exception as e:  # fail-closed: strategy errors never trade
                 if self.risk is not None:
                     self.risk.on_strategy_error(bar, e)
+                    if self.config.fail_on_strategy_error:
+                        raise
                 signal = None
             if signal is not None:
                 if not signal.strategy:
@@ -290,10 +360,25 @@ class ReplayEngine:
         return self._result()
 
     def _process_signal(self, signal: Signal, bar: Candle, i: int) -> None:
+        # Complete trade-state logging: make sure market-context fields
+        # exist on every signal so the journal can persist them, whether
+        # or not the strategy filled them in.
+        setup = signal.setup
+        setup.setdefault("regime", getattr(self, "_current_regime", ""))
+        setup.setdefault("spread_at_entry", float(bar.spread or 0.0))
+        dt = ts_to_dt(bar.time)
+        setup.setdefault("day_of_week", dt.weekday())
+        setup.setdefault("hour_of_day", dt.hour)
         size = signal.size
         if self.risk is not None:
             decision = self.risk.approve(signal, bar, self._equity(), self.positions)
             if not decision.approved:
+                print(
+                    f"[RISK REJECT] "
+                    f"bar={i} "
+                    f"reason={decision.reason} "
+                    f"checks={decision.checks}"
+                )
                 return
             size = decision.size
             signal.size = size
@@ -505,6 +590,10 @@ class ReplayEngine:
             partial_exits=list(getattr(self, "_partial_exits", {}).get(pos.id, [])),
         )
         self.trades.append(outcome)
+
+        if self.risk is not None:
+            self.risk.on_trade_close(r)
+
         if self.journal is not None:
             self.journal.record_trade(outcome, self)
 
@@ -592,4 +681,7 @@ class DummyRiskManager:
         pass
 
     def on_strategy_error(self, bar, err):
+        pass
+
+    def on_trade_close(self, r):
         pass

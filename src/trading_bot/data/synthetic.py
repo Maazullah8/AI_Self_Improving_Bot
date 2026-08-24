@@ -16,8 +16,8 @@ from trading_bot.core.models import Candle, Tick, point_size_for_digits
 from trading_bot.core.time_utils import bar_open_time, utc_ts
 from trading_bot.data.base import DataProvider, MarketDataQuery, SymbolInfo
 
-DEFAULT_START = utc_ts(2020, 1, 1)
-DEFAULT_END = utc_ts(2020, 12, 31, 23, 59)
+DEFAULT_START = utc_ts(2000, 1, 1)
+DEFAULT_END = utc_ts(2026, 12, 31)
 
 
 class SyntheticDataProvider(DataProvider):
@@ -27,13 +27,13 @@ class SyntheticDataProvider(DataProvider):
 
     def __init__(
         self,
-        symbol: str = "EURUSD",
+        symbol: str = "XAUUSD",
         seed: int = 42,
         digits: int = 5,
         start: int = DEFAULT_START,
         end: int = DEFAULT_END,
         tf: Timeframe = Timeframe.H1,
-        initial_price: float = 1.1000,
+        initial_price: float = 4000.000,
         volatility: float = 0.0008,  # per-bar stddev in price units
         drift: float = 0.0,
         trend_cycles: int = 6,
@@ -161,7 +161,7 @@ class SyntheticDataProvider(DataProvider):
             point_size=pt,
             contract_size=100_000,
             lot_min=0.01,
-            lot_max=100.0,
+            lot_max=200.0,
             lot_step=0.01,
         )
 

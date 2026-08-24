@@ -8,6 +8,7 @@ Guarantees:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Optional
 
 from trading_bot.core.enums import Timeframe
 from trading_bot.core.models import Candle, Tick

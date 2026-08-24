@@ -304,3 +304,54 @@ credentials, symbol missing) — it never guesses.
    broker symbol (e.g. `XAUUSD.m`) must match what appears in your MT5
    Market Watch.
 
+## Backtesting data sources (data folder / Supabase / Yahoo)
+
+The Backtesting page shows exactly **where each backtest's candles come from**
+in the "Data Source" card (active provider, file path or table URL, bar count
+and date coverage).
+
+Priority when started with the default `--provider auto`:
+
+1. **Local data folder** - any `*.jsonl` candle file in `src/trading_bot/data/`
+   (e.g. `XAU_5m_data.jsonl`). This is the default and works fully offline.
+2. **Supabase** - used automatically when credentials are present (see below).
+3. **Yahoo Finance** - fallback when yfinance is installed.
+4. **Synthetic** - deterministic demo feed, last resort.
+
+Force a specific source with:
+
+```bash
+PYTHONPATH=src python -m trading_bot.api.run --provider jsonl      # data folder only
+PYTHONPATH=src python -m trading_bot.api.run --provider supabase   # Supabase only
+```
+
+### Connect your Supabase database
+
+1. Copy `.env.example` to `.env` in the repository root.
+2. Fill in your values from Supabase Dashboard -> Project Settings -> API:
+
+   ```
+   SUPABASE_URL=https://YOUR-PROJECT-ref.supabase.co
+   SUPABASE_KEY=your-anon-or-service-key
+   SUPABASE_TABLE=candles
+   ```
+
+3. Create the candles table once (Supabase SQL editor):
+
+   ```sql
+   create table if not exists candles (
+       symbol    text        not null,
+       timeframe text        not null,
+       time      bigint      not null,
+       open      double precision not null,
+       high      double precision not null,
+       low       double precision not null,
+       close     double precision not null,
+       volume    double precision default 0,
+       spread    double precision default 0,
+       primary key (symbol, timeframe, time)
+   );
+   ```
+
+4. Restart the API server. The Data Source card will show
+   "Supabase (https://your-project...)" with a green dot when connected.

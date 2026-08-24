@@ -12,7 +12,7 @@ from trading_bot.risk.manager import RiskConfig, RiskManager
 def _sym():
     return SymbolInfo(
         symbol="EURUSD", digits=5, tick_size=1e-5, point_size=1e-5,
-        lot_min=0.01, lot_max=10.0, lot_step=0.01,
+        lot_min=0.01, lot_max=2000.0, lot_step=0.01,
     )
 
 
@@ -75,7 +75,7 @@ class TestLimits:
         assert dec.reason == "max_positions_reached"
 
     def test_max_drawdown(self):
-        cfg = RiskConfig(max_drawdown_pct=0.10)
+        cfg = RiskConfig(max_relative_drawdown_pct=0.10)
         rm = RiskManager(cfg, symbol_info=_sym())
         # start at 10k, peak later at 12k, then equity drops to 10.5k -> dd = 12.5%
         rm.on_bar_end(_bar(time=utc_ts(2024, 1, 2, 9, 0)), 10_000, [])

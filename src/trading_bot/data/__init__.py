@@ -14,6 +14,10 @@ from trading_bot.data.resample import (
     build_candle_timeframe,
     resample_candles,
 )
+from trading_bot.data.supabase_provider import (
+    SupabaseDataProvider,
+    load_env_file,
+)
 from trading_bot.data.synthetic import SyntheticDataProvider, generate_csv
 from trading_bot.data.yahoo_provider import (
     DEFAULT_SYMBOL,
@@ -31,6 +35,8 @@ __all__ = [
     "BI5DataProvider",
     "MT5DataProvider",
     "mt5_available",
+    "SupabaseDataProvider",
+    "load_env_file",
     "SyntheticDataProvider",
     "generate_csv",
     "YFinanceDataProvider",

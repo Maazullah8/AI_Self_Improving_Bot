@@ -104,16 +104,22 @@ def run_walk_forward(
             train_start=train_start, train_end=train_end,
             val_start=val_start, val_end=val_end,
         )
+        # The FIRST window has no training history (train_start == train_end);
+        # skip that degenerate leg instead of querying a zero-width range.
         train_cfg = _window_cfg(base_cfg, train_start, train_end)
         val_cfg = _window_cfg(base_cfg, val_start, val_end)
-        wf_win.train = runner.run(_fresh(strategy_name, params, version), train_cfg)
+        if train_end > train_start:
+            wf_win.train = runner.run(_fresh(strategy_name, params, version), train_cfg)
         wf_win.val = runner.run(_fresh(strategy_name, params, version), val_cfg)
         result.windows.append(wf_win)
         result.val_n_trades.append(wf_win.val.n_trades)
         result.val_pf.append(_num(wf_win.val.metrics.get("profit_factor")))
         result.val_win_rate.append(_num(wf_win.val.metrics.get("win_rate")))
         result.val_expectancy_r.append(_num(wf_win.val.metrics.get("expectancy_r")))
-        result.val_train_win_rate.append(_num(wf_win.train.metrics.get("win_rate")))
+        train_wr = (
+            wf_win.train.metrics.get("win_rate") if wf_win.train is not None else 0.0
+        )
+        result.val_train_win_rate.append(_num(train_wr))
     return result
 
 
@@ -332,3 +338,196 @@ class PromotionGate:
         if not reasons:
             reasons.append("all promotion gates passed")
         return PromotionResult(passed=passed, checks=checks, reasons=reasons, mc=mc)
+
+
+# ---------------------------------------------------------------- comparison
+_HEADLINE_METRICS = (
+    # (metric key, higher-is-better?)
+    ("total_return_pct", True),
+    ("total_pnl", True),
+    ("n_trades", None),
+    ("win_rate", True),
+    ("profit_factor", True),
+    ("sharpe_r", True),
+    ("max_drawdown_pct", False),
+    ("expectancy_r", True),
+    ("avg_win_r", True),
+    ("avg_loss_r", True),  # negative values: smaller loss => higher
+    ("max_loss_streak", False),
+    ("recovery_factor", True),
+)
+
+
+def _bucket_stats(trades, key_fn):
+    """Aggregate trades into buckets by an arbitrary dimension."""
+    from collections import defaultdict
+
+    groups = defaultdict(list)
+    for t in trades:
+        groups[key_fn(t)].append(t)
+    out = {}
+    for bucket, rows in sorted(groups.items()):
+        n = len(rows)
+        wins = sum(1 for t in rows if t.pnl > 0)
+        out[str(bucket)] = {
+            "trades": n,
+            "win_rate": round(100.0 * wins / n, 1) if n else 0.0,
+            "total_r": round(sum(t.r for t in rows), 2),
+            "total_pnl": round(sum(t.pnl for t in rows), 2),
+        }
+    return out
+
+
+def _year_of(t):
+    import datetime as dt
+
+    return dt.datetime.fromtimestamp(t.entry_time, tz=dt.timezone.utc).year
+
+
+def compare_results(baseline: BacktestResult, candidate: BacktestResult) -> dict:
+    """Side-by-side comparison of a candidate against the current strategy.
+
+    Returns headline metrics with deltas (sign convention: positive delta =
+    candidate better for that metric) plus performance broken down by year,
+    market regime, session and confluence tier so it is obvious WHAT a
+    candidate improved and WHAT it worsened (Section 9).
+
+    This is EVIDENCE, not a decision — the caller/gate decides.
+    """
+    b_metrics = dict(baseline.metrics or {})
+    c_metrics = dict(candidate.metrics or {})
+
+    headline = {}
+    for key, higher_better in _HEADLINE_METRICS:
+        b_val = _num(b_metrics.get(key))
+        c_val = _num(c_metrics.get(key))
+        delta = c_val - b_val
+        entry = {
+            "baseline": round(b_val, 4),
+            "candidate": round(c_val, 4),
+            "delta": round(delta, 4),
+        }
+        if higher_better is not None:
+            entry["improved"] = (delta > 0) if higher_better else (delta < 0)
+        headline[key] = entry
+
+    def by_year(trades):
+        return _bucket_stats(trades, _year_of)
+
+    return {
+        "headline": headline,
+        "by_year": {
+            "baseline": _bucket_stats(baseline.trades, _year_of),
+            "candidate": _bucket_stats(candidate.trades, _year_of),
+        },
+        "by_regime": {
+            "baseline": _bucket_stats(baseline.trades, lambda t: t.regime or "unknown"),
+            "candidate": _bucket_stats(candidate.trades, lambda t: t.regime or "unknown"),
+        },
+        "by_session": {
+            "baseline": _bucket_stats(baseline.trades, lambda t: t.session or "unknown"),
+            "candidate": _bucket_stats(candidate.trades, lambda t: t.session or "unknown"),
+        },
+        "by_confluence_tier": {
+            "baseline": _bucket_stats(baseline.trades, lambda t: t.confluence_level or "unknown"),
+            "candidate": _bucket_stats(candidate.trades, lambda t: t.confluence_level or "unknown"),
+        },
+        "n_trades": {"baseline": len(baseline.trades), "candidate": len(candidate.trades)},
+    }
+
+
+# ------------------------------------------------------------------- paper
+def evaluate_paper(
+    trades,
+    expected: Optional[dict] = None,
+    *,
+    min_trades: int = 10,
+    max_win_rate_dev_pct: float = 15.0,
+    min_expectancy_r: float = 0.0,
+    max_avg_spread_points: Optional[float] = None,
+    point_size: float = 0.0001,
+) -> dict:
+    """Evaluate a candidate's PAPER/DEMO trades against backtest expectations.
+
+    Section 13: a candidate that passes historical tests must still prove
+    itself in forward (demo) operation before going live. Compares realised
+    behaviour against the recorded expectations and execution quality.
+
+    Returns a report dict: {"passed", "checks", "actual"}. This is evidence
+    for the promotion decision — it does not flip any statuses itself.
+    """
+    from collections import defaultdict
+
+    expected = expected or {}
+    trades = list(trades)
+    n = len(trades)
+
+    wins = sum(1 for t in trades if t.pnl > 0)
+    win_rate = round(100.0 * wins / n, 2) if n else 0.0
+    r_series = [t.r for t in trades]
+    expectancy_r = round(sum(r_series) / n, 4) if n else 0.0
+    total_pnl = round(sum(t.pnl for t in trades), 2)
+
+    # execution quality
+    spreads_price = [
+        getattr(t, "spread_at_entry", 0.0) or 0.0 for t in trades
+    ]
+    avg_spread_price = (
+        sum(spreads_price) / len(spreads_price) if spreads_price else 0.0
+    )
+    avg_spread_points = (
+        round(avg_spread_price / point_size, 1) if point_size else None
+    )
+    slips = [getattr(t, "slippage_paid", 0.0) or 0.0 for t in trades]
+    avg_slippage = round(sum(slips) / len(slips), 5) if slips else 0.0
+
+    # trade frequency vs expectation
+    checks = {}
+    passed = True
+
+    c_freq = {"actual": n, "required_min": min_trades}
+    ok_freq = n >= min_trades
+    c_freq["pass"] = ok_freq
+    checks["trade_count"] = c_freq
+    passed &= ok_freq
+
+    exp_wr = expected.get("win_rate")
+    if exp_wr is not None and n:
+        dev = abs(win_rate - float(exp_wr))
+        c = {
+            "expected": exp_wr, "actual": win_rate,
+            "max_deviation_pct": max_win_rate_dev_pct, "deviation": round(dev, 2),
+            "pass": dev <= max_win_rate_dev_pct,
+        }
+        checks["win_rate_deviation"] = c
+        passed &= c["pass"]
+
+    c_exp = {"actual": expectancy_r, "required_min": min_expectancy_r}
+    ok_exp = expectancy_r >= min_expectancy_r
+    c_exp["pass"] = ok_exp
+    checks["expectancy_r"] = c_exp
+    passed &= ok_exp
+
+    if max_avg_spread_points is not None and avg_spread_points is not None:
+        c = {
+            "actual_points": avg_spread_points,
+            "max_points": max_avg_spread_points,
+            "pass": avg_spread_points <= max_avg_spread_points,
+        }
+        checks["spread_execution"] = c
+        passed &= c["pass"]
+
+    return {
+        "passed": bool(passed),
+        "checks": checks,
+        "actual": {
+            "n_trades": n,
+            "win_rate": win_rate,
+            "expectancy_r": expectancy_r,
+            "total_pnl": total_pnl,
+            "avg_spread_points": avg_spread_points,
+            "avg_slippage": avg_slippage,
+        },
+    }
+
+

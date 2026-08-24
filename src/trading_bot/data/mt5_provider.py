@@ -44,9 +44,24 @@ class MT5DataProvider(DataProvider):
 
     name = "mt5"
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 0):
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 0,
+        path: Optional[str] = None,
+        login: Optional[int] = None,
+        password: Optional[str] = None,
+        server: Optional[str] = None,
+    ):
         self.host = host
         self.port = port
+        # Terminal location / account credentials (optional). Typically
+        # supplied from the .env file: MT5_PATH / MT5_LOGIN /
+        # MT5_PASSWORD / MT5_SERVER.
+        self.path = path
+        self.login = int(login) if login not in (None, "", 0) else None
+        self.password = password or None
+        self.server = server or None
         self._connected = False
         self._info_cache: dict[str, SymbolInfo] = {}
         self._mt5 = None
@@ -58,10 +73,18 @@ class MT5DataProvider(DataProvider):
             raise RuntimeError("MetaTrader5 package not installed")
         import MetaTrader5 as mt5
 
+        kwargs = {}
+        if self.path:
+            kwargs["path"] = self.path
+        if self.login:
+            kwargs["login"] = self.login
+        if self.password:
+            kwargs["password"] = self.password
+        if self.server:
+            kwargs["server"] = self.server
         if self.port and self.host:
-            ok = mt5.initialize(login=None, server=None, path=None, portable=True)
-        else:
-            ok = mt5.initialize()
+            kwargs["portable"] = True
+        ok = mt5.initialize(**kwargs) if kwargs else mt5.initialize()
         if not ok:
             raise RuntimeError(f"MT5 initialize failed: {mt5.last_error()}")
         self._mt5 = mt5
@@ -82,13 +105,78 @@ class MT5DataProvider(DataProvider):
 
     def load_candles(self, query: MarketDataQuery) -> Sequence[Candle]:
         mt = self._ensure()
+
         tf_name = MT5_TF_MAP[query.timeframe]
         tf = getattr(mt, tf_name)
-        rate = mt.copy_rates_range(query.symbol, tf, query.start, query.end)
+
+        # ------------------------------------------------------------
+        # Live/current request:
+        # start=0, end=0 means "give me the latest available candles".
+        #
+        # copy_rates_range() expects actual datetime/timestamp values,
+        # so using it with 0/0 can produce incorrect historical results.
+        # ------------------------------------------------------------
+        if query.start == 0 and query.end == 0:
+            rate = mt.copy_rates_from_pos(
+                query.symbol,
+                tf,
+                0,
+                500,
+            )
+
+        # ------------------------------------------------------------
+        # Open-ended request:
+        # start=0, but an explicit end was supplied.
+        # Fetch recent bars and filter to the requested end.
+        # ------------------------------------------------------------
+        elif query.start == 0:
+            rate = mt.copy_rates_from_pos(
+                query.symbol,
+                tf,
+                0,
+                500,
+            )
+
+            if rate is not None and len(rate) > 0:
+                rate = rate[rate["time"] <= query.end]
+
+        # ------------------------------------------------------------
+        # Normal historical range.
+        # ------------------------------------------------------------
+        else:
+            rate = mt.copy_rates_range(
+                query.symbol,
+                tf,
+                query.start,
+                query.end,
+            )
+
         if rate is None or len(rate) == 0:
-            return []
+            error = mt.last_error()
+            raise RuntimeError(
+                f"MT5 returned no candles for "
+                f"{query.symbol} {query.timeframe.value}: {error}"
+            )
+
+        # MT5 reports spread in broker POINTS; the unified Candle model stores
+        # spread as a PRICE distance (see core.models.Candle). Convert once,
+        # here at ingestion, so downstream consumers never re-convert.
+        point_size = 0.0
+        try:
+            si = mt.symbol_info(query.symbol)
+            if si is not None and si.point:
+                point_size = float(si.point)
+        except Exception:
+            point_size = 0.0
+
         bars = []
+
         for row in rate:
+            raw_spread = (
+                float(row["spread"])
+                if "spread" in row.dtype.names
+                else 0.0
+            )
             bars.append(
                 Candle(
                     time=int(row["time"]),
@@ -97,9 +185,12 @@ class MT5DataProvider(DataProvider):
                     low=float(row["low"]),
                     close=float(row["close"]),
                     volume=float(row["tick_volume"]),
-                    spread=float(row["spread"]) if "spread" in row.dtype.names else 0.0,
+                    spread=raw_spread * point_size if point_size else 0.0,
                 )
             )
+
+        bars.sort(key=lambda candle: candle.time)
+
         return bars
 
     def load_ticks(self, query: MarketDataQuery) -> Sequence[Tick]:
@@ -127,7 +218,8 @@ class MT5DataProvider(DataProvider):
         if info is None:
             raise KeyError(f"Unknown symbol {symbol}")
         digits = int(info.digits)
-        pt = point_size_for_digits(digits)
+        pt = float(info.point or point_size_for_digits(digits))
+        
         si = SymbolInfo(
             symbol=symbol,
             digits=digits,
