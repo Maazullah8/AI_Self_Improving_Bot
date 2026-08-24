@@ -42,7 +42,6 @@ from trading_bot.strategy.base import create_strategy
 from trading_bot.data.mt5_provider import MT5DataProvider
 
 
-<<<<<<< HEAD
 
 _ENV = load_env_file()
 
@@ -120,38 +119,6 @@ def build_provider(
             return chain[0]
         if chain:
             return FallbackDataProvider(chain)
-=======
-def build_provider(
-    symbol: str = DEFAULT_SYMBOL,
-    timeframe: str = "5m",
-    mode: str = "auto",
-):
-    """Return the requested market-data provider.
-
-    mode:
-        "mt5"       -> MetaTrader 5 live market data
-        "yfinance"  -> Yahoo Finance
-        "synthetic" -> deterministic demo feed
-        "auto"      -> prefers MT5, then yfinance, then synthetic
-    """
-
-    if mode == "mt5":
-        provider = MT5DataProvider()
-
-        # Force the connection now so startup fails clearly if MT5
-        # is unavailable instead of failing later inside the live thread.
-        provider._ensure()
-
-        return provider
-
-    if mode == "yfinance" or (mode == "auto" and yfinance_available()):
-        return YFinanceDataProvider()
-
-    if mode == "yfinance":
-        raise SystemExit(
-            "yfinance is not installed. Run: pip install -e \".[yfinance]\""
-        )
->>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
 
     now = int(time.time())
 
@@ -288,15 +255,9 @@ def main(argv=None) -> None:
     parser.add_argument("--timeframe", default="5m", choices=["1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d", "1w", "1mo"])
     parser.add_argument(
         "--provider",
-<<<<<<< HEAD
         choices=["auto", "jsonl", "supabase", "mt5", "yfinance", "synthetic"],
         default="auto",
         help="data source: auto (local data folder -> supabase -> yahoo), jsonl, supabase, mt5, yfinance, synthetic",
-=======
-        choices=["auto","mt5", "yfinance", "synthetic"],
-        default="auto",
-        help="data source: mt5 (live MT5), yfinance (Yahoo), synthetic (demo), auto",
->>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
     )
     parser.add_argument("--seed-demo", action="store_true", help="run a backtest + AI review on startup")
     parser.add_argument(

@@ -1,12 +1,7 @@
 "use client";
 
-<<<<<<< HEAD
-import { useEffect, useState } from "react";
-import { FlaskConical, XCircle, CheckCircle2, Loader2 } from "lucide-react";
-
-=======
 import { useEffect, useMemo, useState } from "react";
->>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
+import { FlaskConical, XCircle, CheckCircle2, Loader2 } from "lucide-react";
 import { BookOpen, BrainCircuit, Database, Sparkles, Zap } from "lucide-react";
 
 import AppShell from "@/components/AppShell";
@@ -29,10 +24,8 @@ function Empty({ text }) {
 }
 
 export default function AILearningPage() {
-<<<<<<< HEAD
-  const [show, setShow] = useState(false);
+  // Experiments / AI learning cycle state (local feature work)
   const [experiments, setExperiments] = useState(null);
-  useEffect(() => setShow(true), []);
   useEffect(() => {
     fetch("/api/experiments?limit=50")
       .then((r) => (r.ok ? r.json() : []))
@@ -89,8 +82,8 @@ export default function AILearningPage() {
       setOptRunning(false);
     }
   }
-  const l = DEMO.learning;
-=======
+
+  // Integrated backend data (learning stats)
   const [data, setData] = useState(null);
   const [models, setModels] = useState([]);
 
@@ -102,7 +95,6 @@ export default function AILearningPage() {
   const reviews = data?.reviews || [];
   const strategies = data?.strategies || [];
   const patterns = data?.patterns || [];
-  const latestReview = data?.latestReview || null;
   const activeModel = models.find((m) => m.is_active) || null;
 
   const tradesReviewed = reviews.reduce((s, r) => s + (r.n_trades || 0), 0);
@@ -121,7 +113,6 @@ export default function AILearningPage() {
     { label: "AI Model", value: modelLabel, sub: "Configured in Settings" },
     { label: "Current Strategy", value: currentStrategy, sub: "Latest version" },
   ];
->>>>>>> 12a69025acd48a16f79df12ed494635d1fdcb5e9
 
   return (
     <AppShell>
